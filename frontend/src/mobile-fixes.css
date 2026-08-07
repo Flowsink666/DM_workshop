@@ -1,0 +1,11 @@
+@media (max-width: 900px) {
+  .shell {
+    grid-template-rows: auto 1fr;
+    align-content: start;
+  }
+
+  .new-campaign {
+    display: flex;
+    max-width: 330px;
+  }
+}
