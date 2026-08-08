@@ -30,6 +30,20 @@ def result_actor(service, campaign_id, operation):
     return service.get_campaign(campaign_id)["actors"][actor_id]
 
 
+def test_new_campaign_seeds_common_equipment(service):
+    campaign = service.create_campaign("常见装备目录")
+    items = service.get_campaign(campaign["id"])["items"].values()
+    by_slug = {item["slug"]: item for item in items}
+
+    assert {"handaxe", "mace", "quarterstaff", "spear", "shortbow"} <= set(by_slug)
+    assert {"chain-shirt", "chain-mail", "backpack", "bedroll", "torch",
+            "waterskin", "tinderbox"} <= set(by_slug)
+    assert by_slug["shortbow"]["weapon"] == {
+        "to_hit_ability": "DEX", "damage": "1d6", "damage_type": "piercing"
+    }
+    assert by_slug["chain-shirt"]["armor"]["base_ac"] == 13
+
+
 def test_duplicate_names_receive_distinct_ids(service, campaign):
     first = service.create_actor(campaign["id"], "哥布林", kind="monster")
     second = service.create_actor(campaign["id"], "哥布林", kind="monster")
@@ -189,7 +203,7 @@ def test_nonempty_container_cannot_be_transferred_or_sold(service, campaign):
 
 def test_shop_rejects_invalid_money_configuration(service, campaign):
     with pytest.raises(RuleError):
-        service.create_shop(campaign["id"], "负资产商店", wallet_cp=-1)
+        service.create_shop(campaign["id"], "负资产商店", wallet_gp=-1)
     with pytest.raises(RuleError):
         service.create_shop(campaign["id"], "非法倍率商店", buy_multiplier=float("nan"))
 
@@ -198,31 +212,42 @@ def test_buy_is_atomic_when_actor_cannot_carry(service, campaign):
     actor_id = service.create_actor(
         campaign["id"], "弱者", abilities={"STR": 1}
     )["result"]["actor"]["id"]
-    service.update_actor(campaign["id"], actor_id, {"wallet_cp": 10000})
+    service.update_actor(campaign["id"], actor_id, {"wallet_gp": 10000})
     shop = service.create_shop(campaign["id"], "杂货店")["result"]["shop"]
     rope = next(i for i in service.search_items(campaign["id"], "麻绳"))
     service.stock_shop(campaign["id"], shop["id"], rope["id"], 5)
     with pytest.raises(RuleError, match="负重超限"):
         service.buy_item(campaign["id"], shop["id"], actor_id, rope["id"], 2)
     state = service.get_campaign(campaign["id"])
-    assert state["actors"][actor_id]["wallet_cp"] == 10000
+    assert state["actors"][actor_id]["wallet_gp"] == 10000
     assert state["shops"][shop["id"]]["stock"][rope["id"]] == 5
 
 
-def test_undo_latest_and_reject_stale_undo(service, campaign):
-    operation = service.create_actor(campaign["id"], "A")
-    actor_id = operation["result"]["actor"]["id"]
-    service.store.undo(campaign["id"], operation["operation_id"])
+def test_discard_restores_last_saved_campaign(service, campaign):
+    service.store.save_campaign(campaign["id"], "baseline")
+    actor_id = service.create_actor(
+        campaign["id"], "A"
+    )["result"]["actor"]["id"]
+    assert actor_id in service.get_campaign(campaign["id"])["actors"]
+    service.store.discard_campaign_changes(campaign["id"])
     assert actor_id not in service.get_campaign(campaign["id"])["actors"]
-    with pytest.raises(ConflictError):
-        service.store.undo(campaign["id"], operation["operation_id"])
 
 
-def test_undo_rejects_operation_with_later_changes(service, campaign):
-    first = service.create_actor(campaign["id"], "A")
-    service.create_actor(campaign["id"], "B")
-    with pytest.raises(ConflictError, match="其他修改"):
-        service.store.undo(campaign["id"], first["operation_id"])
+def test_named_save_slots_can_restore_an_older_state(service, campaign):
+    actor_a = service.create_actor(
+        campaign["id"], "A"
+    )["result"]["actor"]["id"]
+    first = service.store.save_campaign(campaign["id"], "A only")
+    actor_b = service.create_actor(
+        campaign["id"], "B"
+    )["result"]["actor"]["id"]
+    service.store.save_campaign(campaign["id"], "A and B")
+    service.store.load_save_slot(
+        campaign["id"], first["result"]["save_id"]
+    )
+    actors = service.get_campaign(campaign["id"])["actors"]
+    assert actor_a in actors
+    assert actor_b not in actors
 
 
 def test_encounter_enforces_turn_and_action_budget(service, campaign):
@@ -352,8 +377,6 @@ def test_multiclass_requires_override_and_records_reason(service, campaign):
         override_reason="剧情赐福",
     )["result"]
     assert result["warnings"]
-    operation = service.store.list_operations(campaign["id"])[0]
-    assert operation["request"]["override_reason"] == "剧情赐福"
 
 
 def test_wizard_spellbook_preparation_and_source_ability(service, campaign):
@@ -440,8 +463,6 @@ def test_noncombat_cast_rejects_actor_in_active_encounter(service, campaign):
         override_reason="Scripted noncombat effect",
     )["result"]
     assert result["warnings"]
-    operation = service.store.list_operations(campaign["id"])[0]
-    assert operation["request"]["override_reason"] == "Scripted noncombat effect"
 
 
 def test_class_downgrade_revalidates_existing_spells(service, campaign):

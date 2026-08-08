@@ -26,10 +26,10 @@ def now_iso() -> str:
 
 
 def new_campaign(name: str) -> dict:
-    """创建空战役快照；revision 由存储层在每次事务后推进。"""
+    """创建空战役快照；revision 仅在显式保存或加载存档时推进。"""
     campaign_id = new_id()
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "id": campaign_id,
         "name": name,
         "ruleset": "dnd5e-2014-srd-5.1",
@@ -39,7 +39,7 @@ def new_campaign(name: str) -> dict:
         "items": {},
         "spells": {},
         "party_inventory": {},
-        "party_wallet_cp": 0,
+        "party_wallet_gp": 0,
         "shops": {},
         "encounters": {},
     }
@@ -47,12 +47,16 @@ def new_campaign(name: str) -> dict:
 
 def normalize_campaign(state: dict) -> dict:
     """补齐旧快照缺失字段，使新增代码可以安全读取早期本地数据库。"""
-    state["schema_version"] = max(2, int(state.get("schema_version", 1)))
+    state["schema_version"] = max(3, int(state.get("schema_version", 1)))
+    state.setdefault("actors", {})
+    state.setdefault("items", {})
     state.setdefault("spells", {})
     state.setdefault("party_inventory", {})
-    state.setdefault("party_wallet_cp", 0)
+    _migrate_gp_field(state, "party_wallet_gp", "party_wallet_cp")
     state.setdefault("shops", {})
     state.setdefault("encounters", {})
+    for item in state["items"].values():
+        _migrate_gp_field(item, "price_gp", "price_cp")
     for spell in state["spells"].values():
         spell.setdefault("name_en", "")
         spell.setdefault("aliases", [])
@@ -80,6 +84,7 @@ def normalize_campaign(state: dict) -> dict:
             "reasons": [] if automatic else ["需要 DM 裁定"],
         })
     for actor in state.get("actors", {}).values():
+        actor.setdefault("preset_id", None)
         actor.setdefault("base_ac", actor.get("ac", 10))
         actor.setdefault("resistances", [])
         actor.setdefault("vulnerabilities", [])
@@ -93,6 +98,7 @@ def normalize_campaign(state: dict) -> dict:
         actor.setdefault("pact_slots", {"slot_level": 0, "max": 0, "used": 0})
         actor.setdefault("mystic_arcanum", {})
         actor.setdefault("resources", {})
+        _migrate_gp_field(actor, "wallet_gp", "wallet_cp")
         actor.setdefault("conditions", {})
         actor.setdefault("life_state", "conscious" if actor.get("hp", 0) > 0
                          else ("unconscious" if actor.get("kind") == "pc" else "dead"))
@@ -101,7 +107,15 @@ def normalize_campaign(state: dict) -> dict:
         encounter.setdefault("outcome", None)
         encounter.setdefault("budgets", {})
         encounter.setdefault("log", [])
+    for shop in state["shops"].values():
+        _migrate_gp_field(shop, "wallet_gp", "wallet_cp")
     return state
+
+
+def _migrate_gp_field(container: dict, gp_key: str, cp_key: str) -> None:
+    """将旧 CP 字段原值迁移为整数 GP；新字段存在时保持其权威性。"""
+    container[gp_key] = int(container.get(gp_key, container.get(cp_key, 0)))
+    container.pop(cp_key, None)
 
 
 def new_actor(name: str, *, kind: str = "pc", level: int = 1,
@@ -114,6 +128,7 @@ def new_actor(name: str, *, kind: str = "pc", level: int = 1,
         stats.update({str(k).upper(): int(v) for k, v in abilities.items()})
     return {
         "id": actor_id,
+        "preset_id": None,
         "name": name,
         "aliases": [],
         "kind": kind,
@@ -143,7 +158,7 @@ def new_actor(name: str, *, kind: str = "pc", level: int = 1,
         "pact_slots": {"slot_level": 0, "max": 0, "used": 0},
         "mystic_arcanum": {},
         "resources": {},
-        "wallet_cp": 0,
+        "wallet_gp": 0,
         "inventory": {},
     }
 

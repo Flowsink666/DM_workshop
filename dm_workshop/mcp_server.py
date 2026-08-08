@@ -2,22 +2,37 @@
 
 from __future__ import annotations
 
+from functools import wraps
+from inspect import signature
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.context import Context
 
 from dm_workshop.dice import roll
-from dm_workshop.currency import coins_to_cp, cp_to_coins
+from dm_workshop.mcp_groups import (
+    CAPABILITY_GROUPS,
+    actions_for_group,
+    get_group,
+    resolve_action,
+    validate_registry,
+)
+from dm_workshop.mcp_compact import (
+    actor_spellcasting as compact_actor_spellcasting,
+    campaign_summary as compact_campaign_summary,
+    campaign_view, compact_catalog_page, mutation_receipt,
+    search_items as compact_search_items,
+    search_spells as compact_search_spells,
+    spell_details as compact_spell_details,
+)
 from dm_workshop.runtime import get_service
 
 mcp = MCPServer(
     "DM Workshop",
     instructions=(
-        "D&D 5e 2014 权威状态工具。写入前先查询战役摘要和实体 ID；"
-        "不要猜测名称对应的 ID。法术先用 search_spell_catalog 查摘要，再按需"
-        "调用 get_spell_details；角色应先配置职业再学习或准备法术。返回 "
-        "manual_resolution_required 时交由 DM 裁定。所有写入都返回 "
-        "operation_id，可用于撤销。"
+        "D&D 5e 2014 状态工具。缓存稳定 ID，使用分页和分区查询，避免重复读取。"
+        "法术正文仅在裁定需要时读取。写入先进入内存草稿，仅在用户明确要求时"
+        "调用 save_campaign；manual_resolution_required 交由 DM 裁定。"
     ),
 )
 
@@ -29,30 +44,39 @@ def list_campaigns() -> list[dict]:
 
 
 @mcp.tool()
-def create_campaign(name: str) -> dict:
+def create_campaign(name: str, preset_characters: list[dict]) -> dict:
     """创建独立战役，并导入 SRD 入门物品目录。"""
-    return get_service().create_campaign(name)
+    state = get_service().create_campaign(name, preset_characters=preset_characters)
+    return {
+        "dirty": True,
+        "result": {
+            "entity_id": state["id"],
+            "changed": {"name": state["name"]},
+        },
+    }
 
 
 @mcp.tool()
 def get_campaign_summary(campaign_id: str) -> dict:
     """查询角色、负重、商店和活动遭遇的紧凑摘要。"""
-    return get_service().campaign_summary(campaign_id)
+    return compact_campaign_summary(get_service(), campaign_id)
 
 
 @mcp.tool()
-def get_campaign_state(campaign_id: str) -> dict:
-    """查询一个战役的完整结构化权威状态。"""
-    return get_service().get_campaign(campaign_id)
+def get_campaign_state(campaign_id: str, view: str = "actors",
+                       entity_id: str | None = None,
+                       limit: int = 10, offset: int = 0) -> dict:
+    """按 view 分区分页查询；actor、shop、encounter 视图必须提供 entity_id。"""
+    return campaign_view(
+        get_service(), campaign_id, view, entity_id=entity_id,
+        limit=limit, offset=offset,
+    )
 
 
 @mcp.tool()
-def create_actor(campaign_id: str, name: str, kind: str = "pc",
-                 level: int = 1, max_hp: int = 10, ac: int = 10,
-                 abilities: dict[str, int] | None = None) -> dict:
-    """创建 PC、NPC 或 monster；返回稳定 actor ID。"""
-    return get_service().create_actor(campaign_id, name, kind=kind, level=level,
-                                      max_hp=max_hp, ac=ac, abilities=abilities)
+def list_actor_presets() -> list[dict]:
+    """列出新战役可选的 12 个一级职业预设及其摘要。"""
+    return get_service().list_actor_presets()
 
 
 @mcp.tool()
@@ -62,15 +86,21 @@ def update_actor(campaign_id: str, actor_id: str, changes: dict[str, Any]) -> di
 
 
 @mcp.tool()
-def search_items(campaign_id: str, query: str = "") -> list[dict]:
+def search_items(campaign_id: str, query: str = "", limit: int = 10,
+                 offset: int = 0) -> dict:
     """按中文名、英文名或别名搜索物品定义并返回 item ID。"""
-    return get_service().search_items(campaign_id, query)
+    return compact_search_items(
+        get_service(), campaign_id, query, limit=limit, offset=offset,
+    )
 
 
 @mcp.tool()
-def search_spells(campaign_id: str, query: str = "") -> list[dict]:
+def search_spells(campaign_id: str, query: str = "", limit: int = 10,
+                  offset: int = 0) -> dict:
     """兼容查询已写入战役的法术；完整目录请使用 search_spell_catalog。"""
-    return get_service().search_spells(campaign_id, query)
+    return compact_search_spells(
+        get_service(), campaign_id, query, limit=limit, offset=offset,
+    )
 
 
 @mcp.tool()
@@ -85,18 +115,22 @@ def search_spell_catalog(campaign_id: str, query: str = "",
                          school: str | None = None,
                          caster_class: str | None = None,
                          ritual: bool | None = None,
-                         limit: int = 20, offset: int = 0) -> dict:
+                         limit: int = 10, offset: int = 0) -> dict:
     """分页搜索完整法术目录；可按环位、学派、职业和仪式筛选，仅返回摘要。"""
-    return get_service().search_spell_catalog(
+    page = get_service().search_spell_catalog(
         campaign_id, query, level=level, school=school,
         caster_class=caster_class, ritual=ritual, limit=limit, offset=offset,
     )
+    return compact_catalog_page(page)
 
 
 @mcp.tool()
-def get_spell_details(campaign_id: str, spell_id: str) -> dict:
-    """按稳定 spell ID 读取法术正文、职业、施法信息和自动结算能力。"""
-    return get_service().get_spell_details(campaign_id, spell_id)
+def get_spell_details(campaign_id: str, spell_id: str,
+                      include_text: bool = False) -> dict:
+    """读取法术规则详情；仅在裁定需要正文时设置 include_text=true。"""
+    return compact_spell_details(
+        get_service(), campaign_id, spell_id, include_text=include_text,
+    )
 
 
 @mcp.tool()
@@ -112,9 +146,14 @@ def set_actor_classes(campaign_id: str, actor_id: str,
 
 
 @mcp.tool()
-def get_actor_spellcasting(campaign_id: str, actor_id: str) -> dict:
+def get_actor_spellcasting(campaign_id: str, actor_id: str,
+                           include_repertoire: bool = False,
+                           limit: int = 10, offset: int = 0) -> dict:
     """查询角色职业施法属性、DC、攻击加值、法术容量和剩余资源。"""
-    return get_service().get_actor_spellcasting(campaign_id, actor_id)
+    return compact_actor_spellcasting(
+        get_service(), campaign_id, actor_id,
+        include_repertoire=include_repertoire, limit=limit, offset=offset,
+    )
 
 
 @mcp.tool()
@@ -159,12 +198,12 @@ def define_spell(campaign_id: str, name: str, level: int, kind: str,
 
 @mcp.tool()
 def define_item(campaign_id: str, name: str, kind: str = "gear",
-                weight_lb: float = 0, price_cp: int = 0,
+                weight_lb: float = 0, price_gp: int = 0,
                 stackable: bool = True, aliases: list[str] | None = None,
                 data: dict[str, Any] | None = None) -> dict:
-    """创建自定义物品定义。金额单位固定为铜币，重量单位为磅。"""
+    """创建自定义物品定义。金额单位固定为整数 GP，重量单位为磅。"""
     return get_service().define_item(
-        campaign_id, name, kind=kind, weight_lb=weight_lb, price_cp=price_cp,
+        campaign_id, name, kind=kind, weight_lb=weight_lb, price_gp=price_gp,
         stackable=stackable, aliases=aliases, data=data,
     )
 
@@ -209,11 +248,11 @@ def unequip_item(campaign_id: str, actor_id: str, stack_id: str) -> dict:
 @mcp.tool()
 def create_shop(campaign_id: str, name: str, buy_multiplier: float = 1.0,
                 sell_multiplier: float = 0.5,
-                wallet_cp: int = 100000) -> dict:
+                wallet_gp: int = 100000) -> dict:
     """创建商店；buy_multiplier 是角色购买价倍率。"""
     return get_service().create_shop(
         campaign_id, name, buy_multiplier=buy_multiplier,
-        sell_multiplier=sell_multiplier, wallet_cp=wallet_cp,
+        sell_multiplier=sell_multiplier, wallet_gp=wallet_gp,
     )
 
 
@@ -355,29 +394,123 @@ def roll_dice(expression: str, critical: bool = False) -> dict:
 
 
 @mcp.tool()
-def convert_coins_to_cp(pp: int = 0, gp: int = 0, ep: int = 0,
-                        sp: int = 0, cp: int = 0) -> dict:
-    """把五种 5e 货币精确换算为程序使用的铜币总值。"""
-    total = coins_to_cp(pp=pp, gp=gp, ep=ep, sp=sp, cp=cp)
-    return {"total_cp": total}
+def save_campaign(campaign_id: str, slot_name: str | None = None,
+                  note: str = "", overwrite: bool = False) -> dict:
+    """按用户明确指示把内存草稿保存到命名存档。"""
+    return get_service().store.save_campaign(
+        campaign_id, slot_name, note=note, overwrite=overwrite,
+    )
 
 
 @mcp.tool()
-def format_cp_as_coins(total_cp: int) -> dict:
-    """把铜币总值格式化为规范 PP/GP/SP/CP 组合。"""
-    return cp_to_coins(total_cp)
+def discard_campaign_changes(campaign_id: str) -> dict:
+    """整体放弃该战役自上次保存后的全部草稿。"""
+    return get_service().store.discard_campaign_changes(campaign_id)
 
 
 @mcp.tool()
-def list_operations(campaign_id: str, limit: int = 50) -> list[dict]:
-    """查询最近写操作及可撤销 operation ID。"""
-    return get_service().store.list_operations(campaign_id, limit)
+def list_save_slots(campaign_id: str, limit: int = 10,
+                    offset: int = 0) -> dict:
+    """分页列出命名存档及当前活动存档。"""
+    return get_service().store.list_save_slots(
+        campaign_id, limit=limit, offset=offset,
+    )
 
 
 @mcp.tool()
-def undo_operation(campaign_id: str, operation_id: str) -> dict:
-    """撤销最后一次未被后续修改覆盖的操作。"""
-    return get_service().store.undo(campaign_id, operation_id, source="mcp")
+def load_save_slot(campaign_id: str, save_id: str) -> dict:
+    """加载命名存档；存在未保存草稿时拒绝。"""
+    return get_service().store.load_save_slot(campaign_id, save_id)
+
+
+_MUTATION_TOOLS = {
+    "update_actor", "set_actor_classes", "learn_spell",
+    "prepare_spell", "define_spell", "define_item", "add_item",
+    "remove_item", "transfer_item", "equip_item", "unequip_item",
+    "create_shop", "stock_shop", "buy_item", "sell_item",
+    "create_encounter", "start_encounter", "combat_attack",
+    "combat_death_save", "combat_cast", "cast_spell", "combat_end_turn",
+    "apply_damage", "heal", "set_condition", "rest",
+}
+
+
+def _install_compact_receipts() -> None:
+    """保留原工具 Schema，只替换执行函数的输出投影。"""
+    for tool_name in _MUTATION_TOOLS:
+        tool = _implementation_mcp._tool_manager._tools[tool_name]
+        original = tool.fn
+        original_signature = signature(original)
+
+        @wraps(original)
+        def compacted(*args, __name=tool_name, __fn=original,
+                      __signature=original_signature, **kwargs):
+            bound = __signature.bind_partial(*args, **kwargs)
+            bound.apply_defaults()
+            return mutation_receipt(
+                __name, __fn(*args, **kwargs), dict(bound.arguments)
+            )
+
+        tool.fn = compacted
+        globals()[tool_name] = compacted
+
+
+_implementation_mcp = mcp
+_install_compact_receipts()
+validate_registry(set(_implementation_mcp._tool_manager._tools))
+
+
+mcp = MCPServer(
+    "DM Workshop",
+    instructions=(
+        "D&D 5e 2014 状态工具。先调用 list_capability_groups 查看功能大类，"
+        "再调用 list_group_actions 读取目标大类的动作，最后使用 call_capability。"
+        "缓存稳定 ID，使用分页和分区查询；写入先进入内存草稿，仅在用户明确要求时"
+        "通过 campaign 大类的 save_campaign 保存。"
+    ),
+)
+
+
+@mcp.tool()
+def list_capability_groups() -> list[dict[str, Any]]:
+    """列出可按需读取的 MCP 功能大类。"""
+    return [
+        {
+            "id": group_id,
+            "name": definition["name"],
+            "description": definition["description"],
+            "action_count": len(definition["actions"]),
+        }
+        for group_id, definition in CAPABILITY_GROUPS.items()
+    ]
+
+
+@mcp.tool()
+def list_group_actions(group: str) -> dict[str, Any]:
+    """读取指定 MCP 大类的动作名称、说明和读写属性。"""
+    definition = get_group(group)
+    return {
+        "id": group,
+        "name": definition["name"],
+        "description": definition["description"],
+        "actions": actions_for_group(
+            group, _implementation_mcp._tool_manager._tools
+        ),
+    }
+
+
+@mcp.tool()
+async def call_capability(
+        group: str, action: str,
+        arguments: dict[str, Any] | None = None) -> Any:
+    """按大类和原动作名调用一个内部 MCP 功能。"""
+    tool = resolve_action(
+        group, action, _implementation_mcp._tool_manager._tools
+    )
+    context = Context(
+        mcp_server=_implementation_mcp,
+        subscriptions=_implementation_mcp._subscriptions,
+    )
+    return await tool.run(arguments or {}, context, convert_result=False)
 
 
 def run() -> None:

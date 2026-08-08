@@ -1,18 +1,19 @@
 # DM Workshop
 
-本地 D&D 5e 2014 权威状态服务。AI 通过 MCP 查询和操作数据，你可以在
-Web 管理台查看、修正和撤销操作。
+> 新战役必须从 12 个一级核心职业预设中选择至少一名角色，并为每个角色命名；同一职业可重复选择。通过 MCP 的 `actors/list_actor_presets` 或 Web 的 `GET /api/actor-presets` 查询预设。`create_actor` 不再作为 MCP、Web 或前端功能公开。
+
+DM Workshop 是一个面向 D&D 5e（2014 规则）的本地 DM 工具与状态服务。它通过 MCP 为 AI Agent 提供结构化的战役状态查询与操作能力，并提供 React Web 管理台用于查看、修正和撤销操作。
 
 ## 当前能力
 
 - 多战役、多角色和稳定 UUID，允许同名角色及怪物
 - 完整基础角色卡、HP/临时 HP、抗性、状态和明确的生死状态机
 - 物品堆叠、装备、标准负重、共享仓库和中英文检索
-- 商店库存、铜币底层金额、购买/出售和事务回滚
+- 商店库存、整数 GP 单币种、购买/出售和事务回滚
 - 无地图先攻与回合、行动经济、武器攻击、死亡豁免和结构化施法
 - SQLite 操作审计及冲突安全的补偿式撤销
 - 八施法职业的 2014 多职业法术位、已知/准备规则和邪术师契约魔法
-- 42 个标准 stdio MCP 工具和本机 React 管理台
+- 3 个标准 stdio MCP 路由工具（覆盖 42 个内部动作）和本机 React 管理台
 
 内置目录是用于验证完整流程的 SRD 入门子集。项目根目录可选的 `spells.db`
 作为用户提供的本地只读目录使用：程序会把 1071 个原始行清洗为 356 个唯一
@@ -70,8 +71,9 @@ Claude Desktop 配置示例：
 }
 ```
 
-AI 应先调用 `list_campaigns`、`get_campaign_summary` 或搜索工具取得实体
-ID，再调用写工具。不要使用名称猜测 ID。
+MCP 默认只公开 `list_capability_groups`、`list_group_actions` 和
+`call_capability`。AI 应先读取大类，再读取相关动作清单，最后使用原动作名
+通过 `call_capability` 调用；不要直接假设或猜测实体 ID。
 
 ## 验证
 
@@ -108,17 +110,14 @@ python -m dm_workshop web --host 127.0.0.1 --port 8765
 
 ## 推荐 MCP 工作流
 
-1. 调用 `list_campaigns` 取得战役 ID。
-2. 调用 `get_campaign_summary` 或 `get_campaign_state` 读取当前修订和实体 ID。
-3. 使用 `search_items` 或分页的 `search_spell_catalog` 获取目录实体 ID。
-4. 用 `get_spell_details` 按需读取正文，不要把全部法术正文放入上下文。
-5. 用 `set_actor_classes` 配置职业，再用 `learn_spell` 或 `prepare_spell`
-   管理法术；通过 `get_actor_spellcasting` 检查 DC、容量和剩余法术位。
-6. 调用 `cast_spell` 或 `combat_cast`；共享位和契约位同时可用时必须明确
-   指定 `slot_pool`。
-7. 保存写操作返回的 `operation_id`。需要撤销时先调用 `list_operations`，
-   再对最新有效操作调用
-   `undo_operation`。
+1. 调用 `list_capability_groups` 查看 7 个功能大类。
+2. 按当前任务调用 `list_group_actions(group)`，读取该大类的动作说明。
+3. 使用 `call_capability(group, action, arguments)` 调用具体动作；动作名仍使用
+   原有函数名，例如 `list_campaigns`、`get_campaign_summary` 或
+   `search_spell_catalog`。
+4. 用 `get_spell_details` 按需读取法术正文，不要把全部法术正文放入上下文。
+5. 写操作仍先进入内存草稿；只有用户明确要求时，才通过
+   `call_capability("campaign", "save_campaign", ...)` 保存。
 
 角色、怪物和物品可以重名，因此不能根据名称猜测 UUID。共享仓库的固定
 owner ID 为 `party`。

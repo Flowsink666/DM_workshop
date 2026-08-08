@@ -1,7 +1,7 @@
 """MCP 与 Web 共用的应用服务层。
 
-所有会修改战役的操作都必须通过本模块进入 ``CampaignStore.mutate``，
-从而保证规则校验、数据写入和审计记录处于同一个 SQLite 事务中。
+所有战役修改都通过 ``CampaignStore.mutate`` 原子更新内存草稿；只有显式保存
+才会把完整快照写入 SQLite。
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from copy import deepcopy
 from typing import Any
 
 from dm_workshop.catalog import STARTER_ITEMS, STARTER_SPELLS
+from dm_workshop.actor_presets import get_preset, list_presets
 from dm_workshop.dice import roll, roll_d20
 from dm_workshop.errors import NotFoundError, RuleError
 from dm_workshop.spell_catalog import ExternalSpellCatalog, normalize_spell_name
@@ -45,12 +46,137 @@ class WorkshopService:
         self.rng = rng or random.SystemRandom()
         self.spell_catalog = spell_catalog or ExternalSpellCatalog()
 
-    def create_campaign(self, name: str, *, seed_srd: bool = True) -> dict:
+    def create_campaign(self, name: str, *, seed_srd: bool = True,
+                        preset_characters: list[dict] | None = None) -> dict:
+        if preset_characters is not None:
+            if not isinstance(preset_characters, list) or not preset_characters:
+                raise RuleError("至少选择一个预设角色")
+            validated = []
+            for entry in preset_characters:
+                if not isinstance(entry, dict):
+                    raise RuleError("preset_characters 必须是对象列表")
+                preset_id = str(entry.get("preset_id", "")).strip()
+                name_value = str(entry.get("name", "")).strip()
+                try:
+                    get_preset(preset_id)
+                except KeyError as exc:
+                    raise RuleError(f"未知角色预设: {preset_id}") from exc
+                if not name_value:
+                    raise RuleError("预设角色名称不能为空")
+                validated.append({"preset_id": preset_id, "name": name_value})
         state = self.store.create_campaign(name)
         if seed_srd:
             self.seed_catalog(state["id"])
             state = self.store.get(state["id"])
+        if preset_characters is not None:
+            try:
+                self._initialize_preset_characters(state["id"], validated)
+                state = self.store.get(state["id"])
+            except Exception:
+                try:
+                    self.store.discard_campaign_changes(state["id"])
+                except Exception:
+                    pass
+                raise
         return state
+
+    def list_actor_presets(self) -> list[dict]:
+        result = []
+        for preset in list_presets():
+            con_mod = (preset["abilities"]["CON"] - 10) // 2
+            hp = preset["hit_die"] + con_mod
+            if preset["preset_id"] == "barbarian":
+                ac = 10 + (preset["abilities"]["DEX"] - 10) // 2 + con_mod
+            elif preset["preset_id"] == "monk":
+                ac = 10 + (preset["abilities"]["DEX"] - 10) // 2 + (preset["abilities"]["WIS"] - 10) // 2
+            else:
+                dex = (preset["abilities"]["DEX"] - 10) // 2
+                slugs = {slug for slug, _ in preset["equipment"]}
+                if "chain-mail" in slugs:
+                    ac = 16
+                elif "scale-mail" in slugs:
+                    ac = 14 + min(2, dex)
+                elif "leather-armor" in slugs:
+                    ac = 11 + dex
+                else:
+                    ac = 10 + dex
+                if "shield" in slugs:
+                    ac += 2
+            result.append({"preset_id": preset["preset_id"], "class": preset["class"],
+                           "class_name": preset["class_name"], "name": "",
+                           "abilities": preset["abilities"], "hp": hp, "ac": ac,
+                           "equipment": preset["equipment"], "spells": preset["spells"]})
+        return result
+
+    def _initialize_preset_characters(self, campaign_id: str,
+                                      selections: list[dict]) -> None:
+        def change(state: dict) -> dict:
+            item_by_slug = {item.get("slug"): item for item in state["items"].values()}
+            spell_by_slug = {spell.get("slug"): spell for spell in state["spells"].values()}
+            created = []
+            for selection in selections:
+                preset = get_preset(selection["preset_id"])
+                missing_items = [slug for slug, _ in preset["equipment"] if slug not in item_by_slug]
+                missing_spells = [slug for values in preset["spells"].values() for slug in values if slug not in spell_by_slug]
+                if missing_items or missing_spells:
+                    raise RuleError("预设目录缺少装备或法术: " + ", ".join(missing_items + missing_spells))
+                abilities = preset["abilities"]
+                con_mod = (abilities["CON"] - 10) // 2
+                ac = 10 + (abilities["DEX"] - 10) // 2
+                if preset["preset_id"] == "barbarian":
+                    ac = 10 + (abilities["DEX"] - 10) // 2 + con_mod
+                elif preset["preset_id"] == "monk":
+                    ac = 10 + (abilities["DEX"] - 10) // 2 + (abilities["WIS"] - 10) // 2
+                actor = new_actor(selection["name"], level=1,
+                                  max_hp=preset["hit_die"] + con_mod, ac=ac,
+                                  abilities=abilities)
+                actor["preset_id"] = preset["preset_id"]
+                actor["skill_proficiencies"] = list(preset["skill_proficiencies"])
+                actor["saving_throw_proficiencies"] = list(preset["saving_throw_proficiencies"])
+                actor["class_levels"] = {preset["class"]: 1}
+                actor["wallet_gp"] = 0
+                rebuild_spellcasting(actor)
+                stacks_by_slug = {}
+                for slug, quantity in preset["equipment"]:
+                    item = item_by_slug[slug]
+                    stack_quantities = [1] * quantity if not item.get("stackable") else [quantity]
+                    for stack_quantity in stack_quantities:
+                        stack = {"id": new_id(), "item_id": item["id"], "quantity": stack_quantity,
+                                 "container_id": None, "equipped_slot": None, "notes": ""}
+                        actor["inventory"][stack["id"]] = stack
+                        stacks_by_slug.setdefault(slug, stack)
+                for slug, slot in (("greataxe", "main_hand"), ("rapier", "main_hand"), ("longsword", "main_hand"),
+                                   ("shortsword", "main_hand"), ("scimitar", "main_hand"), ("quarterstaff", "main_hand"),
+                                   ("longbow", "main_hand"), ("shortbow", "main_hand"), ("mace", "main_hand"),
+                                   ("shield", "shield"), ("leather-armor", "armor"), ("scale-mail", "armor"), ("chain-mail", "armor")):
+                    if slug in stacks_by_slug:
+                        stacks_by_slug[slug]["equipped_slot"] = slot
+                self._recalculate_ac(state, actor)
+                castable_slugs = []
+                for key, values in preset["spells"].items():
+                    if key != "spellbook":
+                        castable_slugs.extend(values)
+                actor["spells"] = list(dict.fromkeys(
+                    spell_by_slug[slug]["id"] for slug in castable_slugs
+                ))
+                for key, values in preset["spells"].items():
+                    mode = "spellbook" if key == "spellbook" else ("prepared" if key == "prepared" else "known")
+                    for slug in values:
+                        spell = spell_by_slug[slug]
+                        repertoire_key = f"{spell['id']}:{preset['class']}"
+                        existing = actor["spell_repertoire"].get(repertoire_key)
+                        if existing is not None and key == "prepared":
+                            existing["prepared"] = True
+                            continue
+                        actor["spell_repertoire"][repertoire_key] = {
+                            "spell_id": spell["id"], "source_class": preset["class"],
+                            "mode": mode, "prepared": mode == "prepared",
+                            "spell_level": int(spell.get("level", 0)), "override_reason": None,
+                        }
+                state["actors"][actor["id"]] = actor
+                created.append(actor["id"])
+            return {"actor_ids": created}
+        self.store.mutate(campaign_id, "initialize_preset_characters", {"count": len(selections)}, change, source="system")
 
     def list_campaigns(self) -> list[dict]:
         return self.store.list_campaigns()
@@ -111,7 +237,7 @@ class WorkshopService:
             "temp_hp", "ac", "speed", "proficiency_bonus",
             "resistances", "vulnerabilities", "immunities",
             "skill_proficiencies", "saving_throw_proficiencies", "spell_slots",
-            "spellcasting_ability", "spells", "resources", "wallet_cp",
+            "spellcasting_ability", "spells", "resources", "wallet_gp",
         }
         unknown = set(changes) - allowed
         if unknown:
@@ -158,25 +284,25 @@ class WorkshopService:
                                  source=source)
 
     def define_item(self, campaign_id: str, name: str, *, kind: str = "gear",
-                    weight_lb: float = 0, price_cp: int = 0,
+                    weight_lb: float = 0, price_gp: int = 0,
                     stackable: bool = True, aliases: list[str] | None = None,
                     data: dict | None = None, source: str = "mcp") -> dict:
         item = {
             "id": new_id(), "slug": None, "name": name.strip(),
             "name_en": "", "aliases": aliases or [], "kind": kind,
-            "weight_lb": float(weight_lb), "price_cp": int(price_cp),
+            "weight_lb": float(weight_lb), "price_gp": int(price_gp),
             "stackable": bool(stackable), "source": "custom",
         }
         extension = deepcopy(data or {})
         protected = set(extension) & {
             "id", "slug", "name", "name_en", "aliases", "kind",
-            "weight_lb", "price_cp", "stackable", "source",
+            "weight_lb", "price_gp", "stackable", "source",
         }
         if protected:
             raise RuleError(f"data 不能覆盖物品核心字段: {sorted(protected)}")
         item.update(extension)
         if (not item["name"] or not math.isfinite(item["weight_lb"])
-                or item["weight_lb"] < 0 or item["price_cp"] < 0):
+                or item["weight_lb"] < 0 or item["price_gp"] < 0):
             raise RuleError("物品名称不能为空，重量和价格不能为负数")
         self._validate_item_definition(item)
 
@@ -661,15 +787,15 @@ class WorkshopService:
 
     def create_shop(self, campaign_id: str, name: str, *,
                     buy_multiplier: float = 1.0, sell_multiplier: float = 0.5,
-                    wallet_cp: int = 100_000, source: str = "mcp") -> dict:
+                    wallet_gp: int = 100_000, source: str = "mcp") -> dict:
         shop = {"id": new_id(), "name": name.strip(), "stock": {},
                 "buy_multiplier": float(buy_multiplier),
                 "sell_multiplier": float(sell_multiplier),
-                "wallet_cp": int(wallet_cp)}
+                "wallet_gp": int(wallet_gp)}
         if (not shop["name"] or not math.isfinite(float(buy_multiplier))
                 or not math.isfinite(float(sell_multiplier))
                 or min(buy_multiplier, sell_multiplier) < 0
-                or int(wallet_cp) < 0):
+                or int(wallet_gp) < 0):
             raise RuleError("商店名称不能为空，价格倍率不能为负")
 
         def change(state: dict) -> dict:
@@ -708,11 +834,11 @@ class WorkshopService:
             stock = shop["stock"][item_id]
             if stock is not None and stock < quantity:
                 raise RuleError("商店库存不足")
-            price = round(item["price_cp"] * shop["buy_multiplier"]) * quantity
-            if actor["wallet_cp"] < price:
+            price = round(item["price_gp"] * shop["buy_multiplier"]) * quantity
+            if actor["wallet_gp"] < price:
                 raise RuleError("角色货币不足")
-            actor["wallet_cp"] -= price
-            shop["wallet_cp"] += price
+            actor["wallet_gp"] -= price
+            shop["wallet_gp"] += price
             if stock is not None:
                 shop["stock"][item_id] -= quantity
             stack = {"id": new_id(), "item_id": item_id, "quantity": quantity,
@@ -721,7 +847,7 @@ class WorkshopService:
             self._merge_stack(state, actor["inventory"], stack)
             self._assert_capacity(state, actor_id)
             return {"item_id": item_id, "quantity": quantity,
-                    "paid_cp": price, "wallet_cp": actor["wallet_cp"]}
+                    "paid_gp": price, "wallet_gp": actor["wallet_gp"]}
         request = locals_request(shop_id=shop_id, actor_id=actor_id,
                                  item_id=item_id, quantity=quantity)
         return self.store.mutate(campaign_id, "buy_item", request, change,
@@ -745,19 +871,19 @@ class WorkshopService:
             if stack["quantity"] < quantity:
                 raise RuleError("物品数量不足")
             item = self._item(state, stack["item_id"])
-            price = round(item["price_cp"] * shop["sell_multiplier"]) * quantity
-            if shop["wallet_cp"] < price:
+            price = round(item["price_gp"] * shop["sell_multiplier"]) * quantity
+            if shop["wallet_gp"] < price:
                 raise RuleError("商店货币不足")
             stack["quantity"] -= quantity
             if stack["quantity"] == 0:
                 del actor["inventory"][stack_id]
-            actor["wallet_cp"] += price
-            shop["wallet_cp"] -= price
+            actor["wallet_gp"] += price
+            shop["wallet_gp"] -= price
             current = shop["stock"].get(item["id"], 0)
             if current is not None:
                 shop["stock"][item["id"]] = current + quantity
             return {"item_id": item["id"], "quantity": quantity,
-                    "received_cp": price, "wallet_cp": actor["wallet_cp"]}
+                    "received_gp": price, "wallet_gp": actor["wallet_gp"]}
         request = locals_request(shop_id=shop_id, actor_id=actor_id,
                                  stack_id=stack_id, quantity=quantity)
         return self.store.mutate(campaign_id, "sell_item", request, change,
@@ -853,7 +979,11 @@ class WorkshopService:
             enc = self._encounter(state, encounter_id)
             if enc["status"] != "setup":
                 raise RuleError("只有准备中的遭遇可以开始")
-            all_ids = [a for members in enc["sides"].values() for a in members]
+            # 阵营顺序固定，避免内存草稿与 JSON 重载后的先攻随机数分配不同。
+            all_ids = [
+                actor_id for side in sorted(enc["sides"])
+                for actor_id in enc["sides"][side]
+            ]
             for actor_id in all_ids:
                 actor = self._actor(state, actor_id)
                 enc["initiatives"][actor_id] = (
@@ -1023,7 +1153,7 @@ class WorkshopService:
                    advantage: bool | None = None,
                    override_reason: str | None = None,
                    source: str = "mcp") -> dict:
-        """在遭遇外施法；复杂效果仍写入审计，但交由 DM 结算。"""
+        """在遭遇外施法；复杂效果记录资源消耗并交由 DM 结算。"""
         requested_class = (
             normalize_class_name(source_class) if source_class else None
         )
@@ -1187,7 +1317,7 @@ class WorkshopService:
         for actor in state["actors"].values():
             copy = {k: actor[k] for k in (
                 "id", "name", "kind", "level", "hp", "max_hp", "ac",
-                "life_state", "wallet_cp")}
+                "life_state", "wallet_gp")}
             copy["inventory_weight_lb"] = self._inventory_weight(state,
                                                                   actor["inventory"])
             copy["capacity_lb"] = carrying_capacity_lb(actor)
@@ -1241,7 +1371,7 @@ class WorkshopService:
 
     def _materialize_spell(self, state: dict, spell_id: str) -> dict:
         if spell_id not in state["spells"]:
-            # 只在学习或准备时复制正文，避免所有审计快照包含完整外部目录。
+            # 只在学习或准备时复制正文，避免战役状态依赖外部目录。
             state["spells"][spell_id] = self.spell_catalog.get(spell_id)
         return state["spells"][spell_id]
 
@@ -1876,7 +2006,7 @@ class WorkshopService:
                 raise RuleError(f"属性 {key} 必须在 1 到 30 之间")
         if actor.get("spellcasting_ability", "INT") not in actor["abilities"]:
             raise RuleError("施法属性必须是角色已有的六项属性之一")
-        if int(actor["wallet_cp"]) < 0:
+        if int(actor["wallet_gp"]) < 0:
             raise RuleError("货币不能为负")
         for level, slot in actor["spell_slots"].items():
             try:

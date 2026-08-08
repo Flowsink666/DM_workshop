@@ -1,14 +1,16 @@
 import React, { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
-  Archive, Backpack, Coins, History, Plus, RefreshCw, RotateCcw,
+  Archive, Backpack, Coins, Plus, RefreshCw, RotateCcw, Save,
   Shield, Store, Swords, UserRound, UsersRound, X,
 } from "lucide-react";
 import "./styles.css";
 import "./mobile-fixes.css";
+import "./save-controls.css";
+import "./preset-controls.css";
 
 type Json = Record<string, any>;
-type Tab = "overview" | "actors" | "inventory" | "shops" | "combat" | "history";
+type Tab = "overview" | "actors" | "inventory" | "shops" | "combat" | "saves";
 type Command = (name: string, body: Json) => Promise<Json | null>;
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -25,7 +27,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 const tabs: Array<[Tab, string, React.ElementType]> = [
   ["overview", "总览", Archive], ["actors", "角色", UsersRound],
   ["inventory", "背包", Backpack], ["shops", "交易", Store],
-  ["combat", "战斗", Swords], ["history", "记录", History],
+  ["combat", "战斗", Swords], ["saves", "存档", Save],
 ];
 
 function App() {
@@ -36,6 +38,12 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [saveDialog, setSaveDialog] = useState(false);
+  const [presets, setPresets] = useState<Json[]>([]);
+  const [presetRows, setPresetRows] = useState<Array<{preset_id:string,name:string}>>([
+    {preset_id:"fighter", name:""},
+  ]);
+  const dirty = Boolean(state?.workspace?.dirty);
 
   const refreshCampaigns = async () => {
     const rows = await api<Json[]>("/api/campaigns");
@@ -47,7 +55,18 @@ function App() {
     setState(await api<Json>(`/api/campaigns/${campaignId}`));
   };
   useEffect(() => { refreshCampaigns().catch(showError); }, []);
+  useEffect(() => {
+    api<Json[]>("/api/actor-presets").then(setPresets).catch(showError);
+  }, []);
   useEffect(() => { refresh().catch(showError); }, [campaignId]);
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (!dirty) return;
+      event.preventDefault();
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
 
   function showError(value: unknown) {
     setError(value instanceof Error ? value.message : String(value));
@@ -60,10 +79,38 @@ function App() {
       const result = await api<Json>(`/api/campaigns/${campaignId}/commands/${name}`, {
         method: "POST", body: JSON.stringify(body),
       });
-      setNotice(`已执行，操作 ID ${result.operation_id.slice(0, 8)}`);
+      setNotice("草稿已更新，尚未保存");
       await refresh(); await refreshCampaigns();
       return result;
     } catch (reason) { showError(reason); return null; }
+    finally { setBusy(false); }
+  }
+  async function saveDraft(slotName?: string, note = "", overwrite = false) {
+    if (!campaignId) return;
+    setBusy(true); setError(""); setNotice("");
+    try {
+      await api(`/api/campaigns/${campaignId}/save`, {
+        method: "POST",
+        body: JSON.stringify({slot_name: slotName, note, overwrite}),
+      });
+      setSaveDialog(false); setNotice("战役已保存");
+      await refresh(); await refreshCampaigns();
+    } catch (reason) { showError(reason); }
+    finally { setBusy(false); }
+  }
+  async function discardDraft() {
+    if (!campaignId || !dirty || !window.confirm("放弃自上次保存后的全部修改？")) return;
+    setBusy(true); setError(""); setNotice("");
+    try {
+      const response = await api<Json>(`/api/campaigns/${campaignId}/discard`, {method:"POST"});
+      if (response.result?.campaign_removed) {
+        setState(null); setCampaignId("");
+      } else {
+        setNotice("未保存修改已放弃");
+        await refresh();
+      }
+      await refreshCampaigns();
+    } catch (reason) { showError(reason); }
     finally { setBusy(false); }
   }
   async function createCampaign(event: FormEvent<HTMLFormElement>) {
@@ -71,13 +118,14 @@ function App() {
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
     const name = String(form.get("name") || "").trim();
-    if (!name) return;
+    if (!name || presetRows.some(row => !row.name.trim())) return;
     setBusy(true);
     try {
       const created = await api<Json>("/api/campaigns", {
-        method: "POST", body: JSON.stringify({ name }),
+        method: "POST", body: JSON.stringify({name, preset_characters: presetRows}),
       });
       formElement.reset();
+      setPresetRows([{preset_id: presets[0]?.preset_id || "fighter", name:""}]);
       await refreshCampaigns(); setCampaignId(created.id);
     } catch (reason) { showError(reason); }
     finally { setBusy(false); }
@@ -89,10 +137,18 @@ function App() {
       <div className="side-label">战役</div>
       <nav className="campaign-list">
         {campaigns.map(c => <button key={c.id} className={campaignId === c.id ? "active" : ""}
-          onClick={() => setCampaignId(c.id)}><span>{c.name}</span><small>r{c.revision}</small></button>)}
+          onClick={() => setCampaignId(c.id)}><span>{c.name}{c.dirty&&<i className="dirty-dot"/>}</span><small>r{c.revision}</small></button>)}
         {!campaigns.length && <p className="empty-side">还没有战役</p>}
       </nav>
       <form className="new-campaign" onSubmit={createCampaign}>
+        <div className="preset-rows">{presetRows.map((row,index)=><div className="preset-row" key={index}>
+          <select aria-label="职业预设" value={row.preset_id} onChange={event=>setPresetRows(rows=>rows.map((value,i)=>i===index?{...value,preset_id:event.target.value}:value))}>
+            {presets.map(preset=><option key={preset.preset_id} value={preset.preset_id}>{preset.class_name}</option>)}
+          </select>
+          <input aria-label="角色名" placeholder="角色名" required value={row.name} onChange={event=>setPresetRows(rows=>rows.map((value,i)=>i===index?{...value,name:event.target.value}:value))}/>
+          {presetRows.length>1&&<button type="button" className="icon-button ghost" title="移除角色" onClick={()=>setPresetRows(rows=>rows.filter((_,i)=>i!==index))}><X size={15}/></button>}
+        </div>)}</div>
+        <button type="button" className="add-preset" onClick={()=>setPresetRows(rows=>[...rows,{preset_id:presets[0]?.preset_id||"fighter",name:""}])}><Plus size={15}/>添加角色</button>
         <input name="name" placeholder="新战役名称" aria-label="新战役名称" />
         <button className="icon-button" title="创建战役" disabled={busy}><Plus size={17}/></button>
       </form>
@@ -100,8 +156,14 @@ function App() {
     </aside>
     <main>
       <header className="topbar">
-        <div><h1>{state?.name || "选择一个战役"}</h1>{state && <span>修订 {state.revision} · {state.ruleset}</span>}</div>
-        <button className="icon-button ghost" title="刷新" onClick={() => refresh().catch(showError)}><RefreshCw size={18}/></button>
+        <div><h1>{state?.name || "选择一个战役"}</h1>{state && <span>存档修订 {state.workspace?.saved_revision ?? state.revision} · {state.ruleset}</span>}</div>
+        <div className="topbar-actions">
+          {dirty&&<span className="dirty-pill">未保存 · {state?.workspace?.draft_version || 0}</span>}
+          <button className="icon-button ghost" title="保存" disabled={!dirty}
+            onClick={()=>state?.workspace?.active_save_id ? saveDraft() : setSaveDialog(true)}><Save size={18}/></button>
+          <button className="icon-button ghost" title="放弃全部草稿" disabled={!dirty} onClick={discardDraft}><RotateCcw size={18}/></button>
+          <button className="icon-button ghost" title="刷新" onClick={() => refresh().catch(showError)}><RefreshCw size={18}/></button>
+        </div>
       </header>
       <nav className="tabs">
         {tabs.map(([id, label, Icon]) => <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>
@@ -117,11 +179,14 @@ function App() {
           {tab === "inventory" && <Inventory state={state} command={command}/>} 
           {tab === "shops" && <Shops state={state} command={command}/>} 
           {tab === "combat" && <Combat state={state} command={command}/>} 
-          {tab === "history" && <Operations campaignId={campaignId} revision={state.revision} refresh={refresh} showError={showError}/>} 
+          {tab === "saves" && <SaveSlots campaignId={campaignId} state={state}
+            refresh={async()=>{await refresh();await refreshCampaigns()}} showError={showError}
+            openSave={()=>setSaveDialog(true)} saveAs={saveDraft}/>}
         </>}
       </section>
     </main>
     {busy && <div className="busy" aria-label="正在处理"><RefreshCw size={22}/></div>}
+    {saveDialog&&<SaveDialog close={()=>setSaveDialog(false)} save={saveDraft}/>}
   </div>;
 }
 
@@ -158,36 +223,26 @@ function Status({value}: {value: string}) {
   const labels: Json = {conscious:"清醒", unconscious:"昏迷", stable:"稳定", dead:"死亡"};
   return <span className={`status ${value}`}>{labels[value] || value}</span>;
 }
-function money(cp:number) {const gp=Math.floor(cp/100), sp=Math.floor(cp%100/10), rest=cp%10;return `${gp} GP ${sp} SP ${rest} CP`}
+function money(gp:number) {return `${gp} GP`}
 
 function Actors({state, command}: {state: Json, command: Command}) {
   const [selected, setSelected] = useState("");
   const actors = Object.values(state.actors) as Json[];
   const actor = state.actors[selected] || actors[0];
   useEffect(() => { if (!selected && actors[0]) setSelected(actors[0].id); }, [actors.length]);
-  async function create(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); const formElement = event.currentTarget; const f = new FormData(formElement);
-    const result = await command("create_actor", {name:f.get("name"), kind:f.get("kind"), level:Number(f.get("level")), max_hp:Number(f.get("max_hp")), ac:Number(f.get("ac"))});
-    if (result) formElement.reset();
-  }
   return <div className="split-view"><div className="list-pane">
     <div className="section-head"><div><h2>角色</h2><p>{actors.length} 个战役实体</p></div></div>
     {actors.map(a => <button key={a.id} className={`entity-button ${actor?.id===a.id?"active":""}`} onClick={()=>setSelected(a.id)}>
       <span className="avatar small">{a.name.slice(0,1)}</span><span><strong>{a.name}</strong><small>{a.kind} · Lv.{a.level}</small></span><Status value={a.life_state}/></button>)}
   </div><div className="detail-pane">
     {actor ? <CharacterSheet actor={actor} command={command}/> : <Empty title="尚无角色"/>}
-    <form className="inline-form create-actor" onSubmit={create}>
-      <h3>添加角色</h3><input name="name" placeholder="名称" required/><select name="kind"><option value="pc">PC</option><option value="npc">NPC</option><option value="monster">怪物</option></select>
-      <input name="level" type="number" defaultValue="1" min="1" max="20"/><input name="max_hp" type="number" defaultValue="10" min="1"/><input name="ac" type="number" defaultValue="10" min="1"/>
-      <button><Plus size={15}/>添加</button>
-    </form>
   </div></div>;
 }
 function CharacterSheet({actor, command}: {actor: Json, command: Command}) {
   const abilities = Object.entries(actor.abilities) as [string,number][];
   const [amount,setAmount] = useState(1);
   return <><div className="sheet-title"><div><h2>{actor.name}</h2><p>{actor.id}</p></div><Status value={actor.life_state}/></div>
-    <div className="vitals"><span><small>HP</small><b>{actor.hp}/{actor.max_hp}</b></span><span><small>临时 HP</small><b>{actor.temp_hp}</b></span><span><small>AC</small><b>{actor.ac}</b></span><span><small>速度</small><b>{actor.speed}</b></span><span><small>货币</small><b>{money(actor.wallet_cp)}</b></span></div>
+    <div className="vitals"><span><small>HP</small><b>{actor.hp}/{actor.max_hp}</b></span><span><small>临时 HP</small><b>{actor.temp_hp}</b></span><span><small>AC</small><b>{actor.ac}</b></span><span><small>速度</small><b>{actor.speed}</b></span><span><small>货币</small><b>{money(actor.wallet_gp)}</b></span></div>
     <div className="ability-grid">{abilities.map(([key,value]) => <div key={key}><span>{key}</span><strong>{value}</strong><small>{Math.floor((value-10)/2)>=0?"+":""}{Math.floor((value-10)/2)}</small></div>)}</div>
     <div className="quick-actions"><input type="number" min="0" value={amount} onChange={e=>setAmount(Number(e.target.value))}/><button className="danger" onClick={()=>command("apply_damage",{actor_id:actor.id,amount})}>扣除 HP</button><button onClick={()=>command("heal",{actor_id:actor.id,amount})}>治疗</button><button onClick={()=>command("rest",{actor_id:actor.id,rest_type:"long"})}>长休</button></div>
     <div className="condition-line"><strong>状态</strong>{Object.keys(actor.conditions).length ? Object.keys(actor.conditions).map(c=><span key={c}>{c}</span>) : <small>无</small>}</div>
@@ -218,8 +273,8 @@ function Shops({state,command}:{state:Json,command:Command}) {
   async function create(e:FormEvent<HTMLFormElement>){e.preventDefault();const formElement=e.currentTarget;const f=new FormData(formElement);const result=await command("create_shop",{name:f.get("name")});if(result)formElement.reset();}
   async function stock(e:FormEvent<HTMLFormElement>){e.preventDefault();const f=new FormData(e.currentTarget);await command("stock_shop",{shop_id:shop.id,item_id:f.get("item_id"),quantity:Number(f.get("quantity"))});}
   return <><div className="toolbar-row"><div><h2>交易</h2><p>所有货币和库存变化原子结算</p></div>{shops.length>0&&<select value={shop?.id} onChange={e=>setShopId(e.target.value)}>{shops.map(s=><option value={s.id} key={s.id}>{s.name}</option>)}</select>}</div>
-    {shop?<><div className="shop-strip"><Store size={20}/><strong>{shop.name}</strong><span><Coins size={15}/>{money(shop.wallet_cp)}</span><span>买入 ×{shop.buy_multiplier}</span><span>回收 ×{shop.sell_multiplier}</span></div>
-    <table><thead><tr><th>物品</th><th>库存</th><th>角色购买价</th><th>购买</th></tr></thead><tbody>{Object.entries(shop.stock).map(([id,qty]:any)=>{const item=state.items[id];return <tr key={id}><td><strong>{item.name}</strong><small>{item.name_en}</small></td><td>{qty===null?"无限":qty}</td><td>{Math.round(item.price_cp*shop.buy_multiplier)} CP</td><td><div className="buy-buttons">{actors.map(a=><button key={a.id} title={`${a.name} 购买`} onClick={()=>command("buy_item",{shop_id:shop.id,actor_id:a.id,item_id:id,quantity:1})}>{a.name}</button>)}</div></td></tr>})}</tbody></table>
+    {shop?<><div className="shop-strip"><Store size={20}/><strong>{shop.name}</strong><span><Coins size={15}/>{money(shop.wallet_gp)}</span><span>买入 ×{shop.buy_multiplier}</span><span>回收 ×{shop.sell_multiplier}</span></div>
+    <table><thead><tr><th>物品</th><th>库存</th><th>角色购买价</th><th>购买</th></tr></thead><tbody>{Object.entries(shop.stock).map(([id,qty]:any)=>{const item=state.items[id];return <tr key={id}><td><strong>{item.name}</strong><small>{item.name_en}</small></td><td>{qty===null?"无限":qty}</td><td>{Math.round(item.price_gp*shop.buy_multiplier)} GP</td><td><div className="buy-buttons">{actors.map(a=><button key={a.id} title={`${a.name} 购买`} onClick={()=>command("buy_item",{shop_id:shop.id,actor_id:a.id,item_id:id,quantity:1})}>{a.name}</button>)}</div></td></tr>})}</tbody></table>
     <form className="inline-form" onSubmit={stock}><select name="item_id">{items.map(i=><option key={i.id} value={i.id}>{i.name}</option>)}</select><input name="quantity" type="number" min="0" defaultValue="1"/><button><Plus size={15}/>设置库存</button></form></>:<Empty title="尚无商店"/>}
     <form className="inline-form" onSubmit={create}><input name="name" placeholder="商店名称" required/><button><Plus size={15}/>创建商店</button></form>
   </>;
@@ -237,11 +292,37 @@ function Combat({state,command}:{state:Json,command:Command}) {
     <form className="inline-form" onSubmit={create}><input name="name" placeholder="遭遇名称" required/><button disabled={!actors.some(a=>a.kind==="pc")||!actors.some(a=>a.kind!=="pc")}><Plus size={15}/>创建遭遇</button></form></>;
 }
 
-function Operations({campaignId,revision,refresh,showError}:any) {
-  const [rows,setRows]=useState<Json[]>([]); const load=()=>api<Json[]>(`/api/campaigns/${campaignId}/operations`).then(setRows).catch(showError);
-  useEffect(()=>{load()},[campaignId,revision]);
-  async function undo(id:string){try{await api(`/api/campaigns/${campaignId}/undo/${id}`,{method:"POST"});await refresh();await load();}catch(e){showError(e)}}
-  return <><div className="toolbar-row"><div><h2>操作记录</h2><p>撤销使用补偿事务，不删除历史</p></div></div><table><thead><tr><th>时间</th><th>操作</th><th>来源</th><th>修订</th><th>参数</th><th></th></tr></thead><tbody>{rows.map((r,i)=><tr key={r.id}><td>{new Date(r.created_at).toLocaleString()}</td><td><strong>{r.kind}</strong><small>{r.id}</small></td><td>{r.source}</td><td>{r.before_revision} → {r.after_revision}</td><td className="request-cell">{JSON.stringify(r.request)}</td><td>{i===0&&!r.undone_by&&r.kind!=="undo"&&<button title="撤销" onClick={()=>undo(r.id)}><RotateCcw size={15}/></button>}</td></tr>)}</tbody></table></>;
+function SaveSlots({campaignId,state,refresh,showError,openSave,saveAs}:any) {
+  const [page,setPage]=useState<Json>({items:[]});
+  const load=()=>api<Json>(`/api/campaigns/${campaignId}/saves?limit=50`).then(setPage).catch(showError);
+  useEffect(()=>{load()},[campaignId,state.workspace?.saved_revision,state.workspace?.dirty]);
+  async function restore(id:string){
+    try {
+      await api(`/api/campaigns/${campaignId}/saves/${id}/load`,{method:"POST"});
+      await refresh(); await load();
+    } catch(e){showError(e)}
+  }
+  async function overwrite(row:Json){
+    if(!window.confirm(`覆盖存档“${row.name}”？`)) return;
+    await saveAs(row.name,row.note||"",true); await load();
+  }
+  const rows=page.items||[];
+  return <><div className="toolbar-row"><div><h2>命名存档</h2><p>只有显式保存才会写入 SQLite</p></div><button className="save-command" onClick={openSave}><Save size={15}/>新建存档</button></div>
+    <table><thead><tr><th>名称</th><th>备注</th><th>修订</th><th>更新时间</th><th></th></tr></thead><tbody>{rows.map((row:Json)=><tr key={row.id}><td><strong>{row.name}</strong><small>{row.active?"当前活动存档":row.id}</small></td><td>{row.note||"—"}</td><td>r{row.revision}</td><td>{new Date(row.updated_at).toLocaleString()}</td><td className="actions"><button disabled={state.workspace?.dirty||row.active} onClick={()=>restore(row.id)}>加载</button><button onClick={()=>overwrite(row)}>覆盖</button></td></tr>)}</tbody></table>
+    {!rows.length&&<Empty title="尚无存档，请先保存当前草稿"/>}</>;
+}
+
+function SaveDialog({close,save}:{close:()=>void,save:(name:string,note:string)=>Promise<void>}) {
+  async function submit(event:FormEvent<HTMLFormElement>){
+    event.preventDefault(); const data=new FormData(event.currentTarget);
+    await save(String(data.get("name")||"").trim(),String(data.get("note")||"").trim());
+  }
+  return <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)close()}}><form className="save-modal" onSubmit={submit}>
+    <div className="modal-head"><div><h2>保存战役</h2><p>创建一个可随时加载的完整存档</p></div><button type="button" className="icon-button ghost" title="关闭" onClick={close}><X size={17}/></button></div>
+    <label>存档名称<input name="name" maxLength={64} defaultValue="主存档" required/></label>
+    <label>备注<textarea name="note" maxLength={500} rows={3}/></label>
+    <div className="modal-actions"><button type="button" onClick={close}>取消</button><button className="primary"><Save size={15}/>保存</button></div>
+  </form></div>;
 }
 function Empty({title}:{title:string}) {return <div className="empty"><Archive size={26}/><strong>{title}</strong></div>}
 

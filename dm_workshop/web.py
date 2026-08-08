@@ -16,7 +16,7 @@ app = FastAPI(title="DM Workshop", version="0.1.0")
 
 COMMANDS = {
     name for name in (
-        "create_actor", "update_actor", "define_item", "define_spell", "add_item",
+        "update_actor", "define_item", "define_spell", "add_item",
         "remove_item", "transfer_item", "equip_item", "unequip_item",
         "create_shop", "stock_shop", "buy_item", "sell_item",
         "apply_damage", "heal", "set_condition", "create_encounter",
@@ -46,10 +46,20 @@ def list_campaigns() -> list[dict]:
     return get_service().list_campaigns()
 
 
+@app.get("/api/actor-presets")
+def actor_presets() -> list[dict]:
+    return get_service().list_actor_presets()
+
+
 @app.post("/api/campaigns", status_code=201)
 def create_campaign(body: dict[str, Any]) -> dict:
     try:
-        return get_service().create_campaign(str(body.get("name", "")))
+        if "preset_characters" not in body:
+            raise HTTPException(status_code=422, detail="preset_characters 至少包含一个角色")
+        return get_service().create_campaign(
+            str(body.get("name", "")),
+            preset_characters=body.get("preset_characters"),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -74,14 +84,31 @@ def search_spells(campaign_id: str, q: str = "") -> list[dict]:
     return get_service().search_spells(campaign_id, q)
 
 
-@app.get("/api/campaigns/{campaign_id}/operations")
-def operations(campaign_id: str, limit: int = 50) -> list[dict]:
-    return get_service().store.list_operations(campaign_id, limit)
+@app.get("/api/campaigns/{campaign_id}/saves")
+def save_slots(campaign_id: str, limit: int = 50,
+               offset: int = 0) -> dict:
+    return get_service().store.list_save_slots(
+        campaign_id, limit=limit, offset=offset,
+    )
 
 
-@app.post("/api/campaigns/{campaign_id}/undo/{operation_id}")
-def undo(campaign_id: str, operation_id: str) -> dict:
-    return get_service().store.undo(campaign_id, operation_id, source="web")
+@app.post("/api/campaigns/{campaign_id}/save")
+def save_campaign(campaign_id: str, body: dict[str, Any]) -> dict:
+    return get_service().store.save_campaign(
+        campaign_id, body.get("slot_name"),
+        note=str(body.get("note", "")),
+        overwrite=bool(body.get("overwrite", False)),
+    )
+
+
+@app.post("/api/campaigns/{campaign_id}/discard")
+def discard_campaign(campaign_id: str) -> dict:
+    return get_service().store.discard_campaign_changes(campaign_id)
+
+
+@app.post("/api/campaigns/{campaign_id}/saves/{save_id}/load")
+def load_save_slot(campaign_id: str, save_id: str) -> dict:
+    return get_service().store.load_save_slot(campaign_id, save_id)
 
 
 @app.post("/api/campaigns/{campaign_id}/commands/{command}")

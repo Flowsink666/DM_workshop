@@ -12,7 +12,7 @@ from dm_workshop.errors import ConflictError, NotFoundError
 from dm_workshop.state import new_campaign, new_id, normalize_campaign, now_iso
 
 
-class CampaignStore:
+class _LegacyCampaignStore:
     """保存版本化战役快照，并为每次写入记录前后状态。"""
     def __init__(self, path: str | Path = "data/dm_workshop.db") -> None:
         self.path = Path(path)
@@ -190,3 +190,7 @@ class CampaignStore:
     def _dump(value: dict) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"),
                           sort_keys=True)
+
+
+# 保留导入路径，实际实现使用手动保存的内存工作区。
+from dm_workshop.workspace_store import CampaignStore as CampaignStore

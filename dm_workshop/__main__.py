@@ -13,14 +13,20 @@ def main() -> None:
     web = sub.add_parser("web", help="启动本机 Web 管理台")
     web.add_argument("--host", default="127.0.0.1")
     web.add_argument("--port", type=int, default=8765)
+    serve = sub.add_parser("serve", help="在同一进程启动 MCP 与 Web")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     if args.command == "mcp":
         from dm_workshop.mcp_server import run
         run()
-    else:
+    elif args.command == "web":
         import uvicorn
         uvicorn.run("dm_workshop.web:app", host=args.host, port=args.port,
                     reload=False)
+    else:
+        from dm_workshop.combined import run
+        run(args.host, args.port)
 
 
 if __name__ == "__main__":

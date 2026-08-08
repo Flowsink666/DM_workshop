@@ -13,17 +13,21 @@ def test_web_campaign_command_flow(tmp_path: Path, monkeypatch):
     client = TestClient(web.app)
 
     assert client.get("/api/health").json() == {"status": "ok"}
-    created = client.post("/api/campaigns", json={"name": "Web 战役"})
+    created = client.post("/api/campaigns", json={
+        "name": "Web 战役",
+        "preset_characters": [{"preset_id": "fighter", "name": "游侠"}],
+    })
     assert created.status_code == 201
     campaign = created.json()
-    assert campaign["revision"] == 1  # SRD seed is an audited operation.
+    assert campaign["revision"] == 0
+    assert campaign["workspace"]["dirty"] is True
 
     actor_result = client.post(
         f"/api/campaigns/{campaign['id']}/commands/create_actor",
         json={"name": "游侠", "kind": "pc", "max_hp": 12, "ac": 14},
     )
-    assert actor_result.status_code == 200
-    actor_id = actor_result.json()["result"]["actor"]["id"]
+    assert actor_result.status_code == 404
+    actor_id = next(iter(campaign["actors"]))
     summary = client.get(f"/api/campaigns/{campaign['id']}/summary").json()
     assert summary["actors"][0]["id"] == actor_id
 
@@ -42,8 +46,18 @@ def test_built_frontend_is_served():
     assert "DM Workshop" in response.text
 
 
-def test_missing_campaign_operations_returns_404(tmp_path: Path, monkeypatch):
+def test_missing_campaign_save_slots_returns_404(tmp_path: Path, monkeypatch):
     service = WorkshopService(CampaignStore(tmp_path / "missing.db"))
     monkeypatch.setattr(web, "get_service", lambda: service)
-    response = TestClient(web.app).get("/api/campaigns/not-found/operations")
+    response = TestClient(web.app).get("/api/campaigns/not-found/saves")
     assert response.status_code == 404
+
+
+def test_web_preset_catalog_and_required_campaign_selection(tmp_path: Path, monkeypatch):
+    service = WorkshopService(CampaignStore(tmp_path / "preset-web.db"))
+    monkeypatch.setattr(web, "get_service", lambda: service)
+    client = TestClient(web.app)
+    presets = client.get("/api/actor-presets")
+    assert presets.status_code == 200
+    assert len(presets.json()) == 12
+    assert client.post("/api/campaigns", json={"name": "缺少角色"}).status_code == 422

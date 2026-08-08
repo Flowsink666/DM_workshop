@@ -1,0 +1,48 @@
+.new-campaign {
+  display: grid;
+  grid-template-columns: 1fr 36px;
+  align-items: end;
+}
+
+.preset-rows,
+.add-preset {
+  grid-column: 1 / -1;
+}
+
+.preset-rows {
+  display: grid;
+  gap: 6px;
+}
+
+.preset-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 36px;
+  gap: 5px;
+}
+
+.preset-row select,
+.preset-row input {
+  width: 100%;
+  background: #22251f;
+  border-color: #41463d;
+  color: white;
+}
+
+.add-preset {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 32px;
+  border: 1px dashed #565c52;
+  border-radius: 4px;
+  color: #c9cdc5;
+  background: transparent;
+  font-size: 11px;
+}
+
+@media (max-width: 900px) {
+  .new-campaign {
+    display: grid;
+  }
+}
