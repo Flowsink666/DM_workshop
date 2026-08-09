@@ -12,3 +12,9 @@ class RuleError(WorkshopError):
 
 class ConflictError(WorkshopError):
     pass
+
+
+class UnsupportedFeatureError(WorkshopError):
+    """A compatibility endpoint exists but its feature is currently disabled."""
+
+    code = "commerce_unavailable"

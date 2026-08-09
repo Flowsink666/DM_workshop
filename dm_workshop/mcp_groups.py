@@ -43,11 +43,6 @@ CAPABILITY_GROUPS: dict[str, dict[str, Any]] = {
             "define_spell", "cast_spell",
         ),
     },
-    "commerce": {
-        "name": "商店交易",
-        "description": "创建商店、设置库存，以及执行购买和出售。",
-        "actions": ("create_shop", "stock_shop", "buy_item", "sell_item"),
-    },
     "encounter": {
         "name": "遭遇与战斗",
         "description": "建立和推进遭遇，执行攻击、战斗施法、死亡豁免和回合结束。",
@@ -68,7 +63,6 @@ MUTATING_ACTIONS = frozenset({
     "create_campaign", "update_actor", "set_actor_classes",
     "learn_spell", "prepare_spell", "define_spell", "define_item",
     "add_item", "remove_item", "transfer_item", "equip_item", "unequip_item",
-    "create_shop", "stock_shop", "buy_item", "sell_item",
     "create_encounter", "start_encounter", "combat_attack",
     "combat_death_save", "combat_cast", "cast_spell", "combat_end_turn",
     "apply_damage", "heal", "set_condition", "rest", "save_campaign",

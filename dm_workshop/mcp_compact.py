@@ -42,10 +42,9 @@ def campaign_summary(service, campaign_id: str) -> dict:
         "active_save_id": workspace.get("active_save_id"),
         "counts": {
             "actors": len(state["actors"]), "items": len(state["items"]),
-            "spells": len(state["spells"]), "shops": len(state["shops"]),
+            "spells": len(state["spells"]),
             "encounters": len(state["encounters"]),
         },
-        "party_wallet_gp": state.get("party_wallet_gp", 0),
         "active_encounters": active,
     }
 
@@ -77,32 +76,6 @@ def campaign_view(service, campaign_id: str, view: str = "actors", *,
                 "container_id": stack.get("container_id"),
             })
         return _page(sorted(values, key=lambda item: item["name"]), limit, offset)
-    if view == "shops":
-        values = [{
-            "id": shop["id"], "name": shop["name"],
-            "wallet_gp": shop["wallet_gp"],
-            "stock_count": len(shop.get("stock", {})),
-        } for shop in state["shops"].values()]
-        return _page(sorted(values, key=lambda item: item["name"]), limit, offset)
-    if view == "shop":
-        shop = _required(state["shops"], entity_id, "商店")
-        stock = []
-        for item_id, quantity in shop.get("stock", {}).items():
-            item = state["items"].get(item_id, {})
-            stock.append({
-                "item_id": item_id, "name": item.get("name", ""),
-                "quantity": quantity, "price_gp": item.get("price_gp", 0),
-            })
-        result = {
-            "id": shop["id"], "name": shop["name"],
-            "wallet_gp": shop["wallet_gp"],
-            "buy_multiplier": shop["buy_multiplier"],
-            "sell_multiplier": shop["sell_multiplier"],
-        }
-        result["stock"] = _page(
-            sorted(stock, key=lambda item: item["name"]), limit, offset
-        )
-        return result
     if view == "encounters":
         values = [_encounter_summary(value) for value in state["encounters"].values()]
         return _page(sorted(values, key=lambda item: item["name"]), limit, offset)
@@ -120,7 +93,7 @@ def campaign_view(service, campaign_id: str, view: str = "actors", *,
         })
         return result
     raise RuleError(
-        "view 必须是 actors、actor、inventory、shops、shop、encounters 或 encounter"
+        "view 必须是 actors、actor、inventory、encounters 或 encounter"
     )
 
 
@@ -251,10 +224,6 @@ def mutation_receipt(tool_name: str, response: dict, arguments: dict) -> dict:
         )}
         if "ac" in result:
             changed["ac"] = result["ac"]
-    elif tool_name == "create_shop":
-        shop = result.get("shop", {})
-        entity_id = shop.get("id")
-        changed = {"name": shop.get("name"), "wallet_gp": shop.get("wallet_gp")}
     elif tool_name in {"create_encounter", "start_encounter"}:
         encounter = result.get("encounter", {})
         entity_id = encounter.get("id", arguments.get("encounter_id"))
@@ -271,7 +240,7 @@ def mutation_receipt(tool_name: str, response: dict, arguments: dict) -> dict:
         changed = deepcopy(result)
     else:
         entity_id = (
-            result.get("actor_id") or result.get("shop_id")
+            result.get("actor_id")
             or result.get("stack_id") or arguments.get("actor_id")
             or arguments.get("owner_id") or arguments.get("shop_id")
         )
@@ -304,7 +273,7 @@ def _actor_details(actor: dict) -> dict:
         "abilities", "proficiency_bonus", "skill_proficiencies",
         "saving_throw_proficiencies", "hp", "max_hp", "temp_hp", "ac",
         "speed", "resistances", "vulnerabilities", "immunities",
-        "conditions", "life_state", "death_saves", "resources", "wallet_gp",
+        "conditions", "life_state", "death_saves", "resources",
     )}
 
 

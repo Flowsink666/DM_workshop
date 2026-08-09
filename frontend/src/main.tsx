@@ -1,8 +1,8 @@
 import React, { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
-  Archive, Backpack, Coins, Plus, RefreshCw, RotateCcw, Save,
-  Shield, Store, Swords, UserRound, UsersRound, X,
+  Archive, Backpack, Plus, RefreshCw, RotateCcw, Save,
+  Shield, Swords, UserRound, UsersRound, X,
 } from "lucide-react";
 import "./styles.css";
 import "./mobile-fixes.css";
@@ -10,7 +10,7 @@ import "./save-controls.css";
 import "./preset-controls.css";
 
 type Json = Record<string, any>;
-type Tab = "overview" | "actors" | "inventory" | "shops" | "combat" | "saves";
+type Tab = "overview" | "actors" | "inventory" | "combat" | "saves";
 type Command = (name: string, body: Json) => Promise<Json | null>;
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -26,7 +26,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 const tabs: Array<[Tab, string, React.ElementType]> = [
   ["overview", "总览", Archive], ["actors", "角色", UsersRound],
-  ["inventory", "背包", Backpack], ["shops", "交易", Store],
+  ["inventory", "背包", Backpack],
   ["combat", "战斗", Swords], ["saves", "存档", Save],
 ];
 
@@ -177,7 +177,6 @@ function App() {
           {tab === "overview" && <Overview state={state}/>} 
           {tab === "actors" && <Actors state={state} command={command}/>} 
           {tab === "inventory" && <Inventory state={state} command={command}/>} 
-          {tab === "shops" && <Shops state={state} command={command}/>} 
           {tab === "combat" && <Combat state={state} command={command}/>} 
           {tab === "saves" && <SaveSlots campaignId={campaignId} state={state}
             refresh={async()=>{await refresh();await refreshCampaigns()}} showError={showError}
@@ -199,7 +198,6 @@ function Overview({state}: {state: Json}) {
     <div className="metrics">
       <Metric icon={UsersRound} label="角色" value={`${alive} / ${actors.length}`} detail="存活 / 总数"/>
       <Metric icon={Backpack} label="物品栈" value={String(inventoryCount)} detail="角色背包"/>
-      <Metric icon={Store} label="商店" value={String(Object.keys(state.shops).length)} detail="可交易地点"/>
       <Metric icon={Swords} label="遭遇" value={active ? `第 ${active.round} 轮` : "无"} detail={active?.name || "当前没有战斗"}/>
     </div>
     <div className="section-head"><div><h2>队伍状态</h2><p>生命、护甲与资源概览</p></div></div>
@@ -223,8 +221,6 @@ function Status({value}: {value: string}) {
   const labels: Json = {conscious:"清醒", unconscious:"昏迷", stable:"稳定", dead:"死亡"};
   return <span className={`status ${value}`}>{labels[value] || value}</span>;
 }
-function money(gp:number) {return `${gp} GP`}
-
 function Actors({state, command}: {state: Json, command: Command}) {
   const [selected, setSelected] = useState("");
   const actors = Object.values(state.actors) as Json[];
@@ -242,7 +238,7 @@ function CharacterSheet({actor, command}: {actor: Json, command: Command}) {
   const abilities = Object.entries(actor.abilities) as [string,number][];
   const [amount,setAmount] = useState(1);
   return <><div className="sheet-title"><div><h2>{actor.name}</h2><p>{actor.id}</p></div><Status value={actor.life_state}/></div>
-    <div className="vitals"><span><small>HP</small><b>{actor.hp}/{actor.max_hp}</b></span><span><small>临时 HP</small><b>{actor.temp_hp}</b></span><span><small>AC</small><b>{actor.ac}</b></span><span><small>速度</small><b>{actor.speed}</b></span><span><small>货币</small><b>{money(actor.wallet_gp)}</b></span></div>
+    <div className="vitals"><span><small>HP</small><b>{actor.hp}/{actor.max_hp}</b></span><span><small>临时 HP</small><b>{actor.temp_hp}</b></span><span><small>AC</small><b>{actor.ac}</b></span><span><small>速度</small><b>{actor.speed}</b></span></div>
     <div className="ability-grid">{abilities.map(([key,value]) => <div key={key}><span>{key}</span><strong>{value}</strong><small>{Math.floor((value-10)/2)>=0?"+":""}{Math.floor((value-10)/2)}</small></div>)}</div>
     <div className="quick-actions"><input type="number" min="0" value={amount} onChange={e=>setAmount(Number(e.target.value))}/><button className="danger" onClick={()=>command("apply_damage",{actor_id:actor.id,amount})}>扣除 HP</button><button onClick={()=>command("heal",{actor_id:actor.id,amount})}>治疗</button><button onClick={()=>command("rest",{actor_id:actor.id,rest_type:"long"})}>长休</button></div>
     <div className="condition-line"><strong>状态</strong>{Object.keys(actor.conditions).length ? Object.keys(actor.conditions).map(c=><span key={c}>{c}</span>) : <small>无</small>}</div>
@@ -252,7 +248,7 @@ function CharacterSheet({actor, command}: {actor: Json, command: Command}) {
 function Inventory({state, command}: {state: Json, command: Command}) {
   const actors = Object.values(state.actors) as Json[];
   const items = state.items as Json;
-  const [owner,setOwner] = useState(actors[0]?.id || "party");
+  const [owner,setOwner] = useState("party");
   const inventory = owner === "party" ? state.party_inventory : state.actors[owner]?.inventory || {};
   const stacks = Object.values(inventory) as Json[];
   const weight = stacks.reduce((sum,s)=>sum + items[s.item_id].weight_lb*s.quantity,0);
@@ -263,20 +259,6 @@ function Inventory({state, command}: {state: Json, command: Command}) {
       const item=items[s.item_id]; return <tr key={s.id}><td><strong>{item.name}</strong><small>{item.name_en}</small></td><td>{item.kind}</td><td>{s.quantity}</td><td>{(item.weight_lb*s.quantity).toFixed(1)} lb</td><td>{s.equipped_slot||"—"}</td><td className="actions">{owner!=="party"&&item.kind==="weapon"&&!s.equipped_slot&&<button onClick={()=>command("equip_item",{actor_id:owner,stack_id:s.id,slot:"main_hand"})}>装备</button>}{s.equipped_slot&&<button onClick={()=>command("unequip_item",{actor_id:owner,stack_id:s.id})}>卸下</button>}<button className="text-danger" onClick={()=>command("remove_item",{owner_id:owner,stack_id:s.id,quantity:1})}>移除</button></td></tr>})}</tbody></table>
     {!stacks.length&&<Empty title="背包为空"/>}
     <form className="inline-form" onSubmit={add}><select name="item_id">{Object.values(items).map((i:any)=><option value={i.id} key={i.id}>{i.name}</option>)}</select><input name="quantity" type="number" min="1" defaultValue="1"/><button><Plus size={15}/>添加物品</button></form>
-  </>;
-}
-
-function Shops({state,command}:{state:Json,command:Command}) {
-  const shops=Object.values(state.shops) as Json[]; const actors=Object.values(state.actors) as Json[]; const items=Object.values(state.items) as Json[];
-  const [shopId,setShopId]=useState(shops[0]?.id||""); const shop=state.shops[shopId]||shops[0];
-  useEffect(()=>{if(!shopId&&shops[0])setShopId(shops[0].id)},[shops.length]);
-  async function create(e:FormEvent<HTMLFormElement>){e.preventDefault();const formElement=e.currentTarget;const f=new FormData(formElement);const result=await command("create_shop",{name:f.get("name")});if(result)formElement.reset();}
-  async function stock(e:FormEvent<HTMLFormElement>){e.preventDefault();const f=new FormData(e.currentTarget);await command("stock_shop",{shop_id:shop.id,item_id:f.get("item_id"),quantity:Number(f.get("quantity"))});}
-  return <><div className="toolbar-row"><div><h2>交易</h2><p>所有货币和库存变化原子结算</p></div>{shops.length>0&&<select value={shop?.id} onChange={e=>setShopId(e.target.value)}>{shops.map(s=><option value={s.id} key={s.id}>{s.name}</option>)}</select>}</div>
-    {shop?<><div className="shop-strip"><Store size={20}/><strong>{shop.name}</strong><span><Coins size={15}/>{money(shop.wallet_gp)}</span><span>买入 ×{shop.buy_multiplier}</span><span>回收 ×{shop.sell_multiplier}</span></div>
-    <table><thead><tr><th>物品</th><th>库存</th><th>角色购买价</th><th>购买</th></tr></thead><tbody>{Object.entries(shop.stock).map(([id,qty]:any)=>{const item=state.items[id];return <tr key={id}><td><strong>{item.name}</strong><small>{item.name_en}</small></td><td>{qty===null?"无限":qty}</td><td>{Math.round(item.price_gp*shop.buy_multiplier)} GP</td><td><div className="buy-buttons">{actors.map(a=><button key={a.id} title={`${a.name} 购买`} onClick={()=>command("buy_item",{shop_id:shop.id,actor_id:a.id,item_id:id,quantity:1})}>{a.name}</button>)}</div></td></tr>})}</tbody></table>
-    <form className="inline-form" onSubmit={stock}><select name="item_id">{items.map(i=><option key={i.id} value={i.id}>{i.name}</option>)}</select><input name="quantity" type="number" min="0" defaultValue="1"/><button><Plus size={15}/>设置库存</button></form></>:<Empty title="尚无商店"/>}
-    <form className="inline-form" onSubmit={create}><input name="name" placeholder="商店名称" required/><button><Plus size={15}/>创建商店</button></form>
   </>;
 }
 

@@ -58,7 +58,7 @@ def create_campaign(name: str, preset_characters: list[dict]) -> dict:
 
 @mcp.tool()
 def get_campaign_summary(campaign_id: str) -> dict:
-    """查询角色、负重、商店和活动遭遇的紧凑摘要。"""
+    """查询角色、负重和活动遭遇的紧凑摘要。"""
     return compact_campaign_summary(get_service(), campaign_id)
 
 
@@ -66,7 +66,7 @@ def get_campaign_summary(campaign_id: str) -> dict:
 def get_campaign_state(campaign_id: str, view: str = "actors",
                        entity_id: str | None = None,
                        limit: int = 10, offset: int = 0) -> dict:
-    """按 view 分区分页查询；actor、shop、encounter 视图必须提供 entity_id。"""
+    """按 view 分区分页查询；actor、encounter 视图必须提供 entity_id。"""
     return campaign_view(
         get_service(), campaign_id, view, entity_id=entity_id,
         limit=limit, offset=offset,
@@ -245,8 +245,7 @@ def unequip_item(campaign_id: str, actor_id: str, stack_id: str) -> dict:
     return get_service().unequip_item(campaign_id, actor_id, stack_id)
 
 
-@mcp.tool()
-def create_shop(campaign_id: str, name: str, buy_multiplier: float = 1.0,
+def _legacy_create_shop(campaign_id: str, name: str, buy_multiplier: float = 1.0,
                 sell_multiplier: float = 0.5,
                 wallet_gp: int = 100000) -> dict:
     """创建商店；buy_multiplier 是角色购买价倍率。"""
@@ -256,23 +255,20 @@ def create_shop(campaign_id: str, name: str, buy_multiplier: float = 1.0,
     )
 
 
-@mcp.tool()
-def stock_shop(campaign_id: str, shop_id: str, item_id: str,
+def _legacy_stock_shop(campaign_id: str, shop_id: str, item_id: str,
                quantity: int | None) -> dict:
     """设置商店库存；quantity 为 null 表示无限库存。"""
     return get_service().stock_shop(campaign_id, shop_id, item_id, quantity)
 
 
-@mcp.tool()
-def buy_item(campaign_id: str, shop_id: str, actor_id: str,
+def _legacy_buy_item(campaign_id: str, shop_id: str, actor_id: str,
              item_id: str, quantity: int = 1) -> dict:
     """原子完成扣款、减库存、加背包和负重校验。"""
     return get_service().buy_item(campaign_id, shop_id, actor_id, item_id,
                                   quantity)
 
 
-@mcp.tool()
-def sell_item(campaign_id: str, shop_id: str, actor_id: str,
+def _legacy_sell_item(campaign_id: str, shop_id: str, actor_id: str,
               stack_id: str, quantity: int = 1) -> dict:
     """原子完成出售、商店付款和库存增加。"""
     return get_service().sell_item(campaign_id, shop_id, actor_id, stack_id,
@@ -427,7 +423,6 @@ _MUTATION_TOOLS = {
     "update_actor", "set_actor_classes", "learn_spell",
     "prepare_spell", "define_spell", "define_item", "add_item",
     "remove_item", "transfer_item", "equip_item", "unequip_item",
-    "create_shop", "stock_shop", "buy_item", "sell_item",
     "create_encounter", "start_encounter", "combat_attack",
     "combat_death_save", "combat_cast", "cast_spell", "combat_end_turn",
     "apply_damage", "heal", "set_condition", "rest",

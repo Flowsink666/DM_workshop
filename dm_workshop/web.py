@@ -9,7 +9,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from dm_workshop.errors import ConflictError, NotFoundError, RuleError, WorkshopError
+from dm_workshop.errors import (
+    ConflictError, NotFoundError, RuleError, UnsupportedFeatureError,
+    WorkshopError,
+)
 from dm_workshop.runtime import get_service
 
 app = FastAPI(title="DM Workshop", version="0.1.0")
@@ -26,14 +29,20 @@ COMMANDS = {
     )
 }
 
+LEGACY_COMMERCE_COMMANDS = {"create_shop", "stock_shop", "buy_item", "sell_item"}
+
 
 @app.exception_handler(WorkshopError)
 async def workshop_error_handler(_, exc: WorkshopError):
     from fastapi.responses import JSONResponse
-    status = 404 if isinstance(exc, NotFoundError) else (
+    status = 501 if isinstance(exc, UnsupportedFeatureError) else (
+        404 if isinstance(exc, NotFoundError) else (
         409 if isinstance(exc, ConflictError) else 422
-    )
-    return JSONResponse(status_code=status, content={"detail": str(exc)})
+    ))
+    content = {"detail": str(exc)}
+    if isinstance(exc, UnsupportedFeatureError):
+        content["code"] = exc.code
+    return JSONResponse(status_code=status, content=content)
 
 
 @app.get("/api/health")
@@ -114,6 +123,10 @@ def load_save_slot(campaign_id: str, save_id: str) -> dict:
 @app.post("/api/campaigns/{campaign_id}/commands/{command}")
 def execute_command(campaign_id: str, command: str,
                     body: dict[str, Any]) -> dict:
+    if command in LEGACY_COMMERCE_COMMANDS:
+        raise UnsupportedFeatureError("商店系统当前已下线")
+    if command not in COMMANDS:
+        raise HTTPException(status_code=404, detail=f"未知命令: {command}")
     # 白名单阻止调用者借动态路由访问 service 的内部辅助方法。
     if command not in COMMANDS:
         raise HTTPException(status_code=404, detail=f"未知命令: {command}")

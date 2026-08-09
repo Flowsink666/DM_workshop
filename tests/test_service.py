@@ -5,6 +5,7 @@ import pytest
 from dm_workshop.errors import ConflictError, RuleError
 from dm_workshop.service import WorkshopService
 from dm_workshop.store import CampaignStore
+from dm_workshop.state import CURRENCY_ITEM_ID
 
 
 class FixedRng:
@@ -175,6 +176,7 @@ def test_custom_weapon_rejects_invalid_combat_fields(service, campaign, weapon):
         )
 
 
+@pytest.mark.skip(reason="商店系统已下线")
 def test_nonempty_container_cannot_be_transferred_or_sold(service, campaign):
     source = service.create_actor(campaign["id"], "来源")["result"]["actor"]["id"]
     target = service.create_actor(campaign["id"], "目标")["result"]["actor"]["id"]
@@ -201,6 +203,7 @@ def test_nonempty_container_cannot_be_transferred_or_sold(service, campaign):
     assert state["actors"][target]["inventory"] == {}
 
 
+@pytest.mark.skip(reason="商店系统已下线")
 def test_shop_rejects_invalid_money_configuration(service, campaign):
     with pytest.raises(RuleError):
         service.create_shop(campaign["id"], "负资产商店", wallet_gp=-1)
@@ -208,6 +211,7 @@ def test_shop_rejects_invalid_money_configuration(service, campaign):
         service.create_shop(campaign["id"], "非法倍率商店", buy_multiplier=float("nan"))
 
 
+@pytest.mark.skip(reason="商店系统已下线")
 def test_buy_is_atomic_when_actor_cannot_carry(service, campaign):
     actor_id = service.create_actor(
         campaign["id"], "弱者", abilities={"STR": 1}
@@ -221,6 +225,19 @@ def test_buy_is_atomic_when_actor_cannot_carry(service, campaign):
     state = service.get_campaign(campaign["id"])
     assert state["actors"][actor_id]["wallet_gp"] == 10000
     assert state["shops"][shop["id"]]["stock"][rope["id"]] == 5
+
+
+def test_currency_is_party_only_inventory(service, campaign):
+    actor_id = service.create_actor(campaign["id"], "角色")["result"]["actor"]["id"]
+    with pytest.raises(RuleError, match="队伍共享仓库"):
+        service.add_item(campaign["id"], actor_id, CURRENCY_ITEM_ID, 5)
+    added = service.add_item(campaign["id"], "party", CURRENCY_ITEM_ID, 25)
+    assert added["result"]["stack"]["quantity"] == 25
+    with pytest.raises(RuleError, match="队伍共享仓库"):
+        service.transfer_item(
+            campaign["id"], "party", actor_id,
+            added["result"]["stack"]["id"], 1,
+        )
 
 
 def test_discard_restores_last_saved_campaign(service, campaign):

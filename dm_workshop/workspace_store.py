@@ -49,6 +49,7 @@ class CampaignStore:
 
     def _initialize(self) -> None:
         legacy = False
+        state_migration = False
         if self.path.exists() and self.path.stat().st_size:
             with sqlite3.connect(self.path) as conn:
                 tables = {
@@ -57,7 +58,21 @@ class CampaignStore:
                     )
                 }
                 legacy = "campaigns" in tables and "save_slots" not in tables
+                if not legacy and "campaigns" in tables:
+                    rows = conn.execute("SELECT state_json FROM campaigns").fetchall()
+                    rows += conn.execute(
+                        "SELECT state_json FROM save_slots"
+                    ).fetchall() if "save_slots" in tables else []
+                    for row in rows:
+                        try:
+                            if int(json.loads(row[0]).get("schema_version", 1)) < 4:
+                                state_migration = True
+                                break
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            continue
         if legacy:
+            self.migration_backup = self._backup_legacy_database()
+        elif state_migration:
             self.migration_backup = self._backup_legacy_database()
 
         with self._connect() as conn:

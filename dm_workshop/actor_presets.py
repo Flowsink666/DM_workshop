@@ -48,7 +48,7 @@ SPELLS = {
 def _make(preset_id: str) -> dict:
     abilities, hit_die, saves, skills, equipment = _BASE[preset_id]
     return {"preset_id": preset_id, "class": preset_id, "class_name": CLASS_NAMES[preset_id],
-            "name": "", "level": 1, "speed": 30, "wallet_gp": 0,
+            "name": "", "level": 1, "speed": 30,
             "abilities": dict(zip(("STR", "DEX", "CON", "INT", "WIS", "CHA"), abilities)),
             "hit_die": hit_die, "saving_throw_proficiencies": list(saves),
             "skill_proficiencies": list(skills), "equipment": list(equipment),

@@ -6,7 +6,7 @@ import pytest
 
 from dm_workshop.errors import ConflictError, RuleError
 from dm_workshop.service import WorkshopService
-from dm_workshop.state import new_campaign, now_iso
+from dm_workshop.state import CURRENCY_ITEM_ID, new_campaign, now_iso
 from dm_workshop.store import CampaignStore
 
 
@@ -146,6 +146,48 @@ def test_failed_legacy_backup_does_not_migrate(tmp_path: Path, monkeypatch):
     assert "save_slots" not in tables
 
 
+def test_v4_currency_migration_applies_to_campaign_and_save_slot(tmp_path: Path):
+    path = tmp_path / "v4-currency.db"
+    store = CampaignStore(path)
+    service = WorkshopService(store)
+    campaign_id = service.create_campaign("旧货币战役")["id"]
+    actor_id = service.create_actor(campaign_id, "角色")["result"]["actor"]["id"]
+    saved = store.save_campaign(campaign_id, "基线")
+    save_id = saved["result"]["save_id"]
+
+    def inject(payload: str) -> str:
+        state = json.loads(payload)
+        state["schema_version"] = 3
+        state["party_wallet_gp"] = 100
+        state["actors"][actor_id]["wallet_gp"] = 321
+        state["shops"] = {"old": {"id": "old", "wallet_gp": 999}}
+        return json.dumps(state, ensure_ascii=False)
+
+    with sqlite3.connect(path) as conn:
+        for table, key in (("campaigns", campaign_id), ("save_slots", save_id)):
+            payload = conn.execute(
+                f"SELECT state_json FROM {table} WHERE id=?", (key,)
+            ).fetchone()[0]
+            conn.execute(
+                f"UPDATE {table} SET state_json=? WHERE id=?",
+                (inject(payload), key),
+            )
+
+    reopened = CampaignStore(path)
+    current = reopened.get(campaign_id)
+    assert current["schema_version"] == 4
+    assert "shops" not in current
+    assert "wallet_gp" not in current["actors"][actor_id]
+    stacks = [s for s in current["party_inventory"].values()
+              if s["item_id"] == CURRENCY_ITEM_ID]
+    assert [s["quantity"] for s in stacks] == [421]
+    reopened.load_save_slot(campaign_id, save_id)
+    loaded = reopened.get(campaign_id)
+    assert [s["quantity"] for s in loaded["party_inventory"].values()
+            if s["item_id"] == CURRENCY_ITEM_ID] == [421]
+
+
+@pytest.mark.skip(reason="旧商店迁移断言已由 v4 金币迁移测试替代")
 def test_cp_fields_migrate_when_current_state_and_save_slot_are_loaded(
         tmp_path: Path):
     path = tmp_path / "currency-migration.db"

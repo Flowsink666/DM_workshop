@@ -14,7 +14,7 @@ from typing import Any
 from dm_workshop.catalog import STARTER_ITEMS, STARTER_SPELLS
 from dm_workshop.actor_presets import get_preset, list_presets
 from dm_workshop.dice import roll, roll_d20
-from dm_workshop.errors import NotFoundError, RuleError
+from dm_workshop.errors import NotFoundError, RuleError, UnsupportedFeatureError
 from dm_workshop.spell_catalog import ExternalSpellCatalog, normalize_spell_name
 from dm_workshop.spell_rules import (
     CASTING_ABILITIES, CLASS_NAMES_ZH, KNOWN_CASTERS,
@@ -25,7 +25,7 @@ from dm_workshop.spell_rules import (
 )
 from dm_workshop.state import (
     CONDITIONS, EQUIPMENT_SLOTS, ability_mod, carrying_capacity_lb, new_actor,
-    new_id,
+    CURRENCY_ITEM_ID, new_id,
 )
 from dm_workshop.store import CampaignStore
 
@@ -134,7 +134,6 @@ class WorkshopService:
                 actor["skill_proficiencies"] = list(preset["skill_proficiencies"])
                 actor["saving_throw_proficiencies"] = list(preset["saving_throw_proficiencies"])
                 actor["class_levels"] = {preset["class"]: 1}
-                actor["wallet_gp"] = 0
                 rebuild_spellcasting(actor)
                 stacks_by_slug = {}
                 for slug, quantity in preset["equipment"]:
@@ -237,7 +236,7 @@ class WorkshopService:
             "temp_hp", "ac", "speed", "proficiency_bonus",
             "resistances", "vulnerabilities", "immunities",
             "skill_proficiencies", "saving_throw_proficiencies", "spell_slots",
-            "spellcasting_ability", "spells", "resources", "wallet_gp",
+            "spellcasting_ability", "spells", "resources",
         }
         unknown = set(changes) - allowed
         if unknown:
@@ -659,6 +658,8 @@ class WorkshopService:
 
         def change(state: dict) -> dict:
             item = self._item(state, item_id)
+            if item_id == CURRENCY_ITEM_ID and owner_id != "party":
+                raise RuleError("金币只能存放在队伍共享仓库")
             inventory = self._inventory(state, owner_id)
             if container_id and container_id not in inventory:
                 raise NotFoundError(f"找不到容器物品栈: {container_id}")
@@ -727,6 +728,8 @@ class WorkshopService:
                    for child in source_inv.values()):
                 raise RuleError("非空容器不能直接转移，请先取出其中物品")
             item_id = stack["item_id"]
+            if item_id == CURRENCY_ITEM_ID and to_owner_id != "party":
+                raise RuleError("金币只能存放在队伍共享仓库")
             stack["quantity"] -= quantity
             if stack["quantity"] == 0:
                 del source_inv[stack_id]
@@ -785,7 +788,7 @@ class WorkshopService:
         return self.store.mutate(campaign_id, "unequip_item", locals_request(
             actor_id=actor_id, stack_id=stack_id), change, source=source)
 
-    def create_shop(self, campaign_id: str, name: str, *,
+    def _legacy_create_shop(self, campaign_id: str, name: str, *,
                     buy_multiplier: float = 1.0, sell_multiplier: float = 0.5,
                     wallet_gp: int = 100_000, source: str = "mcp") -> dict:
         shop = {"id": new_id(), "name": name.strip(), "stock": {},
@@ -804,7 +807,7 @@ class WorkshopService:
         return self.store.mutate(campaign_id, "create_shop", shop, change,
                                  source=source)
 
-    def stock_shop(self, campaign_id: str, shop_id: str, item_id: str,
+    def _legacy_stock_shop(self, campaign_id: str, shop_id: str, item_id: str,
                    quantity: int | None, *, source: str = "mcp") -> dict:
         if quantity is not None and int(quantity) < 0:
             raise RuleError("库存不能为负；null 表示无限库存")
@@ -819,7 +822,7 @@ class WorkshopService:
             shop_id=shop_id, item_id=item_id, quantity=quantity), change,
             source=source)
 
-    def buy_item(self, campaign_id: str, shop_id: str, actor_id: str,
+    def _legacy_buy_item(self, campaign_id: str, shop_id: str, actor_id: str,
                  item_id: str, quantity: int = 1, *, source: str = "mcp") -> dict:
         quantity = int(quantity)
         if quantity <= 0:
@@ -853,7 +856,7 @@ class WorkshopService:
         return self.store.mutate(campaign_id, "buy_item", request, change,
                                  source=source)
 
-    def sell_item(self, campaign_id: str, shop_id: str, actor_id: str,
+    def _legacy_sell_item(self, campaign_id: str, shop_id: str, actor_id: str,
                   stack_id: str, quantity: int = 1, *, source: str = "mcp") -> dict:
         quantity = int(quantity)
         if quantity <= 0:
@@ -1317,7 +1320,7 @@ class WorkshopService:
         for actor in state["actors"].values():
             copy = {k: actor[k] for k in (
                 "id", "name", "kind", "level", "hp", "max_hp", "ac",
-                "life_state", "wallet_gp")}
+                "life_state")}
             copy["inventory_weight_lb"] = self._inventory_weight(state,
                                                                   actor["inventory"])
             copy["capacity_lb"] = carrying_capacity_lb(actor)
@@ -1326,7 +1329,6 @@ class WorkshopService:
                   if e["status"] == "active"]
         return {"id": state["id"], "name": state["name"],
                 "revision": state["revision"], "actors": actors,
-                "shops": list(state["shops"].values()),
                 "active_encounters": active}
 
     @staticmethod
@@ -2006,8 +2008,6 @@ class WorkshopService:
                 raise RuleError(f"属性 {key} 必须在 1 到 30 之间")
         if actor.get("spellcasting_ability", "INT") not in actor["abilities"]:
             raise RuleError("施法属性必须是角色已有的六项属性之一")
-        if int(actor["wallet_gp"]) < 0:
-            raise RuleError("货币不能为负")
         for level, slot in actor["spell_slots"].items():
             try:
                 numeric_level = int(level)
@@ -2079,13 +2079,6 @@ class WorkshopService:
             raise NotFoundError(f"找不到法术定义: {spell_id}") from exc
 
     @staticmethod
-    def _shop(state: dict, shop_id: str) -> dict:
-        try:
-            return state["shops"][shop_id]
-        except KeyError as exc:
-            raise NotFoundError(f"找不到商店: {shop_id}") from exc
-
-    @staticmethod
     def _encounter(state: dict, encounter_id: str) -> dict:
         try:
             return state["encounters"][encounter_id]
@@ -2098,6 +2091,19 @@ class WorkshopService:
             return inventory[stack_id]
         except KeyError as exc:
             raise NotFoundError(f"找不到物品栈: {stack_id}") from exc
+
+    # Compatibility names remain callable by the Web adapter, but never mutate state.
+    def create_shop(self, *args: Any, **kwargs: Any) -> dict:
+        raise UnsupportedFeatureError("商店系统当前已下线")
+
+    def stock_shop(self, *args: Any, **kwargs: Any) -> dict:
+        raise UnsupportedFeatureError("商店系统当前已下线")
+
+    def buy_item(self, *args: Any, **kwargs: Any) -> dict:
+        raise UnsupportedFeatureError("商店系统当前已下线")
+
+    def sell_item(self, *args: Any, **kwargs: Any) -> dict:
+        raise UnsupportedFeatureError("商店系统当前已下线")
 
 
 def locals_request(**values: Any) -> dict:
