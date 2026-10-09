@@ -13,6 +13,7 @@ from typing import Any
 
 from dm_workshop.catalog import STARTER_ITEMS, STARTER_SPELLS
 from dm_workshop.actor_presets import get_preset, list_presets
+from dm_workshop.monster_presets import get_monster_preset, list_monster_presets
 from dm_workshop.dice import roll, roll_d20
 from dm_workshop.errors import NotFoundError, RuleError, UnsupportedFeatureError
 from dm_workshop.spell_catalog import ExternalSpellCatalog, normalize_spell_name
@@ -24,8 +25,8 @@ from dm_workshop.spell_rules import (
     spellcasting_summary,
 )
 from dm_workshop.state import (
-    CONDITIONS, EQUIPMENT_SLOTS, ability_mod, carrying_capacity_lb, new_actor,
-    CURRENCY_ITEM_ID, new_id,
+    ABILITIES, CONDITIONS, EQUIPMENT_SLOTS, ability_mod, carrying_capacity_lb,
+    new_actor, CURRENCY_ITEM_ID, new_id, proficiency_bonus, passive_perception,
 )
 from dm_workshop.store import CampaignStore
 
@@ -33,6 +34,44 @@ DAMAGE_TYPES = {
     "acid", "bludgeoning", "cold", "fire", "force", "lightning",
     "necrotic", "piercing", "poison", "psychic", "radiant", "slashing",
     "thunder",
+}
+
+SKILL_ABILITIES: dict[str, str] = {
+    "athletics": "STR",
+    "acrobatics": "DEX",
+    "sleight_of_hand": "DEX",
+    "stealth": "DEX",
+    "arcana": "INT",
+    "history": "INT",
+    "investigation": "INT",
+    "nature": "INT",
+    "religion": "INT",
+    "animal_handling": "WIS",
+    "insight": "WIS",
+    "medicine": "WIS",
+    "perception": "WIS",
+    "survival": "WIS",
+    "deception": "CHA",
+    "intimidation": "CHA",
+    "performance": "CHA",
+    "persuasion": "CHA",
+}
+
+SKILL_ALIASES_ZH: dict[str, str] = {
+    "运动": "athletics", "体操": "acrobatics", "杂技": "acrobatics",
+    "巧手": "sleight_of_hand", "隐匿": "stealth", "潜行": "stealth",
+    "奥秘": "arcana", "历史": "history", "调查": "investigation",
+    "自然": "nature", "宗教": "religion", "驯兽": "animal_handling",
+    "动物沟通": "animal_handling", "洞悉": "insight", "医疗": "medicine",
+    "医药": "medicine", "察觉": "perception", "感知": "perception",
+    "生存": "survival", "欺瞒": "deception", "骗术": "deception",
+    "威吓": "intimidation", "恐吓": "intimidation", "表演": "performance",
+    "说服": "persuasion",
+}
+
+ABILITY_ALIASES_ZH: dict[str, str] = {
+    "力量": "STR", "敏捷": "DEX", "体质": "CON",
+    "智力": "INT", "感知": "WIS", "魅力": "CHA",
 }
 
 
@@ -402,6 +441,10 @@ class WorkshopService:
                         f"{sorted(missing)}"
                     )
             actor["class_levels"] = deepcopy(normalized)
+            total_level = sum(normalized.values())
+            if total_level > 0:
+                actor["level"] = total_level
+                actor["proficiency_bonus"] = proficiency_bonus(total_level)
             for spell_id in actor["spells"]:
                 class_id = assignments.get(spell_id)
                 if class_id is None:
@@ -926,6 +969,90 @@ class WorkshopService:
         return self.store.mutate(campaign_id, "heal", locals_request(
             actor_id=actor_id, amount=amount), change, source=source)
 
+    def check_ability(self, campaign_id: str, actor_id: str,
+                      ability: str | None = None, *,
+                      skill: str | None = None,
+                      is_saving_throw: bool = False,
+                      dc: int | None = None,
+                      advantage: bool | None = None,
+                      source: str = "mcp") -> dict:
+        """执行 5e 核心属性检定、技能检定或豁免检定。"""
+        normalized_skill = None
+        if skill:
+            skill_clean = str(skill).strip()
+            normalized_skill = SKILL_ALIASES_ZH.get(skill_clean, skill_clean.casefold())
+            if normalized_skill not in SKILL_ABILITIES:
+                raise RuleError(f"未知技能: {skill}")
+
+        target_ability = None
+        if ability:
+            ability_clean = str(ability).strip()
+            target_ability = ABILITY_ALIASES_ZH.get(ability_clean, ability_clean.upper())
+        elif normalized_skill:
+            target_ability = SKILL_ABILITIES[normalized_skill]
+        else:
+            raise RuleError("必须提供 ability (属性) 或 skill (技能)")
+
+        if target_ability not in ABILITIES:
+            raise RuleError(f"未知属性: {ability}")
+
+        if dc is not None:
+            dc = int(dc)
+            if dc < 0:
+                raise RuleError("DC 必须大于或等于零")
+
+        def change(state: dict) -> dict:
+            actor = self._actor(state, actor_id)
+            mod = ability_mod(actor, target_ability)
+            prof_bonus = int(actor.get("proficiency_bonus", proficiency_bonus(actor.get("level", 1))))
+
+            proficient = False
+            if is_saving_throw:
+                saves = [str(s).upper() for s in actor.get("saving_throw_proficiencies", [])]
+                proficient = target_ability in saves
+            elif normalized_skill:
+                actor_skills = [str(s).casefold() for s in actor.get("skill_proficiencies", [])]
+                actor_skills_mapped = [SKILL_ALIASES_ZH.get(s, s) for s in actor_skills]
+                proficient = normalized_skill in actor_skills_mapped
+
+            total_bonus = mod + (prof_bonus if proficient else 0)
+            d20 = roll_d20(rng=self.rng, advantage=advantage)
+            total = d20["kept"] + total_bonus
+            success = (total >= dc) if dc is not None else None
+
+            check_type = "豁免" if is_saving_throw else ("技能检定" if normalized_skill else "属性检定")
+            name_label = f"{target_ability}({skill})" if normalized_skill else target_ability
+            dc_label = f" vs DC {dc} -> {'成功' if success else '失败'}" if dc is not None else ""
+            summary = (
+                f"[{actor['name']}] {name_label} {check_type}: "
+                f"d20投出 {d20['kept']} + {total_bonus} = {total}{dc_label}"
+            )
+
+            result = {
+                "actor_id": actor_id,
+                "actor_name": actor["name"],
+                "ability": target_ability,
+                "skill": normalized_skill,
+                "is_saving_throw": is_saving_throw,
+                "d20": d20,
+                "ability_modifier": mod,
+                "proficiency_bonus": prof_bonus,
+                "proficient": proficient,
+                "total_bonus": total_bonus,
+                "total": total,
+                "dc": dc,
+                "success": success,
+                "summary": summary,
+            }
+            return result
+
+        request = locals_request(
+            actor_id=actor_id, ability=target_ability, skill=normalized_skill,
+            is_saving_throw=is_saving_throw, dc=dc, advantage=advantage,
+        )
+        return self.store.mutate(campaign_id, "check_ability", request, change,
+                                 source=source)
+
     def set_condition(self, campaign_id: str, actor_id: str, name: str, *,
                       duration: int | None = None, condition_source: str = "",
                       remove: bool = False, source: str = "mcp") -> dict:
@@ -1009,6 +1136,107 @@ class WorkshopService:
         return self.store.mutate(campaign_id, "start_encounter",
                                  {"encounter_id": encounter_id}, change,
                                  source=source)
+
+    def end_encounter(self, campaign_id: str, encounter_id: str,
+                      outcome: str = "victory", *,
+                      source: str = "mcp") -> dict:
+        """正常结束并归档一场遭遇战。"""
+        if outcome not in {"victory", "defeat", "fled", "draw"}:
+            raise RuleError("outcome 必须是 victory, defeat, fled 或 draw")
+
+        def change(state: dict) -> dict:
+            enc = self._encounter(state, encounter_id)
+            if enc.get("status") == "completed":
+                raise RuleError("遭遇战已经处于结束状态")
+            enc["status"] = "completed"
+            enc["outcome"] = outcome
+            event = {"event": "end_encounter", "outcome": outcome, "round": enc.get("round", 0)}
+            enc["log"].append(event)
+            return {"encounter_id": encounter_id, "status": "completed", "outcome": outcome}
+
+        request = locals_request(encounter_id=encounter_id, outcome=outcome)
+        return self.store.mutate(campaign_id, "end_encounter", request, change, source=source)
+
+    def list_monster_presets(self) -> list[dict]:
+        """列出内置的标准 SRD 怪物预设列表。"""
+        return list_monster_presets()
+
+    def spawn_monster(self, campaign_id: str, preset_id: str,
+                      name: str | None = None, count: int = 1,
+                      *, source: str = "mcp") -> dict:
+        """从预设快速实例化一个或多个怪物实体加入战役。"""
+        preset = get_monster_preset(preset_id)
+        count = max(1, min(20, int(count)))
+
+        def change(state: dict) -> dict:
+            created_monsters = []
+            for i in range(count):
+                m_name = (str(name).strip() if name
+                          else (preset["name"] if count == 1 else f"{preset['name']} {chr(65 + i)}"))
+                actor = new_actor(
+                    m_name,
+                    kind="monster",
+                    level=preset.get("level", 1),
+                    max_hp=preset.get("max_hp", 10),
+                    ac=preset.get("ac", 10),
+                    abilities=preset.get("abilities"),
+                )
+                actor["preset_id"] = preset["preset_id"]
+                actor["speed"] = preset.get("speed", 30)
+                actor["resistances"] = list(preset.get("resistances", []))
+                actor["vulnerabilities"] = list(preset.get("vulnerabilities", []))
+                actor["immunities"] = list(preset.get("immunities", []))
+                actor["skill_proficiencies"] = list(preset.get("skill_proficiencies", []))
+                actor["saving_throw_proficiencies"] = list(preset.get("saving_throw_proficiencies", []))
+
+                items_by_slug = {
+                    item["slug"]: item["id"]
+                    for item in state.get("items", {}).values()
+                    if item.get("slug")
+                }
+                for slug, qty in preset.get("equipment", []):
+                    item_id = items_by_slug.get(slug)
+                    if item_id:
+                        stack_id = new_id()
+                        item_def = state["items"][item_id]
+                        slot = "main_hand" if item_def.get("kind") == "weapon" and not any(
+                            s.get("equipped_slot") == "main_hand" for s in actor["inventory"].values()
+                        ) else None
+                        actor["inventory"][stack_id] = {
+                            "id": stack_id, "item_id": item_id, "quantity": qty,
+                            "container_id": None, "equipped_slot": slot, "notes": "",
+                        }
+                state["actors"][actor["id"]] = actor
+                created_monsters.append({"id": actor["id"], "name": actor["name"], "hp": actor["hp"], "ac": actor["ac"]})
+
+            return {"preset_id": preset["preset_id"], "count": count, "monsters": created_monsters}
+
+        request = locals_request(preset_id=preset_id, name=name, count=count)
+        return self.store.mutate(campaign_id, "spawn_monster", request, change, source=source)
+
+    def delete_actor(self, campaign_id: str, actor_id: str,
+                     *, source: str = "mcp") -> dict:
+        """从战役中删除角色或已战败的怪物实体。"""
+        def change(state: dict) -> dict:
+            actor = self._actor(state, actor_id)
+            for enc in state.get("encounters", {}).values():
+                if enc.get("status") == "active":
+                    all_members = [m for members in enc.get("sides", {}).values() for m in members]
+                    if actor_id in all_members:
+                        raise RuleError("角色正在进行中的遭遇战内，不能直接删除")
+            for enc in state.get("encounters", {}).values():
+                for side, members in enc.get("sides", {}).items():
+                    if actor_id in members:
+                        members.remove(actor_id)
+                if actor_id in enc.get("turn_order", []):
+                    enc["turn_order"].remove(actor_id)
+                enc.get("initiatives", {}).pop(actor_id, None)
+
+            del state["actors"][actor_id]
+            return {"actor_id": actor_id, "name": actor["name"], "deleted": True}
+
+        request = locals_request(actor_id=actor_id)
+        return self.store.mutate(campaign_id, "delete_actor", request, change, source=source)
 
     def combat_attack(self, campaign_id: str, encounter_id: str,
                       actor_id: str, target_id: str, *, stack_id: str | None = None,
@@ -1273,22 +1501,41 @@ class WorkshopService:
                                   "actor_id": actor_id}, change, source=source)
 
     def rest(self, campaign_id: str, actor_id: str, rest_type: str, *,
-             hit_dice_healing: int = 0, source: str = "mcp") -> dict:
+             hit_dice_spent: int = 0, hit_dice_healing: int = 0,
+             source: str = "mcp") -> dict:
         if rest_type not in {"short", "long"}:
             raise RuleError("休息类型必须是 short 或 long")
         hit_dice_healing = int(hit_dice_healing)
-        if hit_dice_healing < 0:
-            raise RuleError("短休生命骰治疗量不能为负")
+        hit_dice_spent = int(hit_dice_spent)
+        if hit_dice_healing < 0 or hit_dice_spent < 0:
+            raise RuleError("短休生命骰治疗量和消耗数量不能为负")
 
         def change(state: dict) -> dict:
             actor = self._actor(state, actor_id)
             if actor["life_state"] == "dead":
                 raise RuleError("死亡角色不能休息")
+
+            # 确保 actor 具备 hit_dice 结构
+            hd_total = int(actor.get("level", 1))
+            hd_info = actor.setdefault("hit_dice", {"total": hd_total, "used": 0, "die": "d8"})
+
             if rest_type == "short":
                 before = actor["hp"]
-                actor["hp"] = min(actor["max_hp"], actor["hp"] + hit_dice_healing)
+                actual_healing = hit_dice_healing
+                if hit_dice_spent > 0:
+                    available = max(0, int(hd_info.get("total", hd_total)) - int(hd_info.get("used", 0)))
+                    if hit_dice_spent > available:
+                        raise RuleError(f"可用生命骰不足：剩余 {available}，试图消耗 {hit_dice_spent}")
+                    hd_info["used"] = int(hd_info.get("used", 0)) + hit_dice_spent
+                    # 如果未手动传治疗量，自动投骰
+                    if actual_healing == 0:
+                        sides = int(str(hd_info.get("die", "d8")).replace("d", "") or 8)
+                        con_mod = ability_mod(actor, "CON")
+                        for _ in range(hit_dice_spent):
+                            actual_healing += max(1, self.rng.randint(1, sides) + con_mod)
+
+                actor["hp"] = min(actor["max_hp"], actor["hp"] + actual_healing)
                 healed = actor["hp"] - before
-                # 契约魔法位短休恢复，普通法术位与玄奥秘法不恢复。
                 actor.get("pact_slots", {})["used"] = 0
             else:
                 healed = actor["max_hp"] - actor["hp"]
@@ -1302,17 +1549,55 @@ class WorkshopService:
                 for resource in actor["resources"].values():
                     if resource.get("recharge") == "long_rest":
                         resource["current"] = resource["max"]
+                # 长休恢复一半最大生命骰 (至少 1)
+                total_hd = int(hd_info.get("total", hd_total))
+                recovered_hd = max(1, total_hd // 2)
+                hd_info["used"] = max(0, int(hd_info.get("used", 0)) - recovered_hd)
+
             if actor["hp"] > 0:
                 self._wake(actor)
             return {"actor_id": actor_id, "rest_type": rest_type,
                     "healed": healed, "hp": actor["hp"],
+                    "hit_dice": deepcopy(actor.get("hit_dice", {})),
                     "spell_slots": deepcopy(actor["spell_slots"]),
                     "pact_slots": deepcopy(actor.get("pact_slots", {})),
                     "mystic_arcanum": deepcopy(actor.get("mystic_arcanum", {}))}
         request = locals_request(actor_id=actor_id, rest_type=rest_type,
+                                 hit_dice_spent=hit_dice_spent,
                                  hit_dice_healing=hit_dice_healing)
         return self.store.mutate(campaign_id, "rest", request, change,
                                  source=source)
+
+    def adjust_currency(self, campaign_id: str, amount_gp: int, *,
+                        owner_id: str = "party",
+                        source: str = "mcp") -> dict:
+        """直接增加或扣除队伍共享仓库（或指定角色背包）中的金币数量。"""
+        amount_gp = int(amount_gp)
+
+        def change(state: dict) -> dict:
+            inv = (state["party_inventory"] if owner_id == "party"
+                   else self._actor(state, owner_id)["inventory"])
+            currency_stack = next(
+                (s for s in inv.values() if s.get("item_id") == CURRENCY_ITEM_ID),
+                None
+            )
+            current_qty = int(currency_stack["quantity"]) if currency_stack else 0
+            new_qty = current_qty + amount_gp
+            if new_qty < 0:
+                raise RuleError(f"金币不足：当前拥有 {current_qty} GP，无法扣除 {abs(amount_gp)} GP")
+
+            if currency_stack is not None:
+                currency_stack["quantity"] = new_qty
+            elif new_qty > 0:
+                stack_id = new_id()
+                inv[stack_id] = {
+                    "id": stack_id, "item_id": CURRENCY_ITEM_ID, "quantity": new_qty,
+                    "container_id": None, "equipped_slot": None, "notes": "",
+                }
+            return {"owner_id": owner_id, "delta_gp": amount_gp, "total_gp": new_qty}
+
+        request = locals_request(amount_gp=amount_gp, owner_id=owner_id)
+        return self.store.mutate(campaign_id, "adjust_currency", request, change, source=source)
 
     def campaign_summary(self, campaign_id: str) -> dict:
         state = self.store.get(campaign_id)
@@ -1321,6 +1606,7 @@ class WorkshopService:
             copy = {k: actor[k] for k in (
                 "id", "name", "kind", "level", "hp", "max_hp", "ac",
                 "life_state")}
+            copy["passive_perception"] = passive_perception(actor)
             copy["inventory_weight_lb"] = self._inventory_weight(state,
                                                                   actor["inventory"])
             copy["capacity_lb"] = carrying_capacity_lb(actor)
@@ -1569,7 +1855,7 @@ class WorkshopService:
         temp_absorbed = min(actor["temp_hp"], effective)
         actor["temp_hp"] -= temp_absorbed
         remaining = effective - temp_absorbed
-        # 只有穿透临时 HP 的实际伤害才会让 0 HP 角色死亡豁免失败。
+        instant_kill = False
         if (remaining > 0 and original_hp == 0
                 and actor["life_state"] in {"unconscious", "stable"}):
             actor["life_state"] = "unconscious"
@@ -1580,15 +1866,23 @@ class WorkshopService:
         else:
             actor["hp"] = max(0, actor["hp"] - remaining)
             if actor["hp"] == 0:
+                overflow = max(0, remaining - original_hp)
                 if actor["kind"] == "pc":
-                    self._knock_unconscious(actor, source="damage")
+                    if overflow >= actor["max_hp"] and actor["max_hp"] > 0:
+                        actor["life_state"] = "dead"
+                        actor["conditions"].pop("unconscious", None)
+                        actor["death_saves"] = {"successes": 0, "failures": 3}
+                        instant_kill = True
+                    else:
+                        self._knock_unconscious(actor, source="damage")
                 else:
                     actor["life_state"] = "dead"
         return {"requested_damage": amount, "damage": effective,
                 "temp_hp_absorbed": temp_absorbed,
                 "hp": actor["hp"], "life_state": actor["life_state"],
                 "death_saves": deepcopy(actor["death_saves"]),
-                "damage_type": damage_type}
+                "damage_type": damage_type,
+                "instant_death": instant_kill}
 
     @staticmethod
     def _wake(actor: dict) -> None:

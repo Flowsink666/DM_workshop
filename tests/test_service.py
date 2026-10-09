@@ -554,3 +554,153 @@ def test_warlock_mystic_arcanum_is_once_per_long_rest(service, campaign):
         campaign["id"], actor_id, spell["id"], source_class="warlock"
     )["result"]
     assert again["slot_pool"] == "arcanum"
+
+
+def test_multiclass_level_and_proficiency_bonus_recalculated(service, campaign):
+    actor_id = service.create_actor(
+        campaign["id"], "升级法师", level=1, abilities={"INT": 16, "STR": 14}
+    )["result"]["actor"]["id"]
+    service.set_actor_classes(campaign["id"], actor_id, {"wizard": 5})
+    actor = service.get_campaign(campaign["id"])["actors"][actor_id]
+    assert actor["level"] == 5
+    assert actor["proficiency_bonus"] == 3
+
+    service.set_actor_classes(campaign["id"], actor_id, {"wizard": 8, "fighter": 1})
+    actor = service.get_campaign(campaign["id"])["actors"][actor_id]
+    assert actor["level"] == 9
+    assert actor["proficiency_bonus"] == 4
+
+
+def test_instant_death_massive_damage(service, campaign):
+    # 满血 10，当前 4 HP，受到 14 点伤害：4点降为0，溢出10点 >= max_hp 10 -> 即死
+    actor_id = service.create_actor(
+        campaign["id"], "脆皮游荡者", kind="pc", max_hp=10
+    )["result"]["actor"]["id"]
+    service.apply_damage(campaign["id"], actor_id, 6)
+    curr = service.get_campaign(campaign["id"])["actors"][actor_id]
+    assert curr["hp"] == 4
+
+    result = service.apply_damage(campaign["id"], actor_id, 14)["result"]
+    assert result["hp"] == 0
+    assert result["life_state"] == "dead"
+    assert result["instant_death"] is True
+
+
+def test_check_ability_with_skill_and_saving_throw(service, campaign):
+    actor_id = service.create_actor(
+        campaign["id"], "精明法师", abilities={"INT": 16, "WIS": 14, "DEX": 10}
+    )["result"]["actor"]["id"]
+    # 模拟技能与豁免熟练
+    service.update_actor(campaign["id"], actor_id, {
+        "skill_proficiencies": ["arcana", "perception"],
+        "saving_throw_proficiencies": ["INT", "WIS"],
+    })
+    # 纯属性检定 (DEX: 10 -> mod 0, prof 0)
+    res_dex = service.check_ability(campaign["id"], actor_id, "DEX")["result"]
+    assert res_dex["ability"] == "DEX"
+    assert res_dex["proficient"] is False
+    assert res_dex["total_bonus"] == 0
+
+    # 技能检定 (奥秘 -> INT 16 -> mod +3, 熟练 +2 -> total bonus +5)
+    res_arcana = service.check_ability(
+        campaign["id"], actor_id, skill="奥秘", dc=15
+    )["result"]
+    assert res_arcana["ability"] == "INT"
+    assert res_arcana["proficient"] is True
+    assert res_arcana["total_bonus"] == 5
+    assert res_arcana["dc"] == 15
+    assert isinstance(res_arcana["success"], bool)
+
+    # 豁免检定 (WIS -> mod +2, 熟练 +2 -> total bonus +4)
+    res_save = service.check_ability(
+        campaign["id"], actor_id, "WIS", is_saving_throw=True
+    )["result"]
+    assert res_save["is_saving_throw"] is True
+    assert res_save["proficient"] is True
+    assert res_save["total_bonus"] == 4
+
+
+def test_monster_spawn_encounter_and_lifecycle(service, campaign):
+    # 1. 验证可列出怪物预设
+    presets = service.list_monster_presets()
+    preset_ids = {p["preset_id"] for p in presets}
+    assert {"goblin", "bandit", "skeleton", "orc"} <= preset_ids
+
+    # 2. 刷出 2 只哥布林
+    spawned = service.spawn_monster(campaign["id"], "goblin", count=2)["result"]
+    assert spawned["count"] == 2
+    goblin_ids = [m["id"] for m in spawned["monsters"]]
+    assert len(goblin_ids) == 2
+
+    # 验证哥布林自动装备了弯刀
+    goblin = service.get_campaign(campaign["id"])["actors"][goblin_ids[0]]
+    assert goblin["kind"] == "monster"
+    assert goblin["hp"] == 7
+    assert any(s.get("equipped_slot") == "main_hand" for s in goblin["inventory"].values())
+
+    # 3. 创建遭遇战 (PC vs 哥布林)
+    pc_id = service.create_actor(campaign["id"], "勇士", kind="pc")["result"]["actor"]["id"]
+    enc = service.create_encounter(
+        campaign["id"], "哥布林埋伏", {"party": [pc_id], "enemy": goblin_ids}
+    )["result"]["encounter"]
+    assert enc["status"] == "setup"
+
+    # 4. 开始遭遇战
+    started = service.start_encounter(campaign["id"], enc["id"])["result"]["encounter"]
+    assert started["status"] == "active"
+    assert len(started["turn_order"]) == 3
+
+    # 5. 遭遇战进行中不允许删除角色
+    with pytest.raises(RuleError, match="遭遇战内"):
+        service.delete_actor(campaign["id"], goblin_ids[0])
+
+    # 6. 结束遭遇战
+    ended = service.end_encounter(campaign["id"], enc["id"], outcome="victory")["result"]
+    assert ended["status"] == "completed"
+    assert ended["outcome"] == "victory"
+
+    # 7. 遭遇战结束后允许清理怪物
+    deleted = service.delete_actor(campaign["id"], goblin_ids[0])["result"]
+    assert deleted["deleted"] is True
+    assert goblin_ids[0] not in service.get_campaign(campaign["id"])["actors"]
+
+
+def test_short_rest_with_hit_dice_and_long_rest_recovery(service, campaign):
+    actor_id = service.create_actor(
+        campaign["id"], "武僧", level=4, max_hp=30, abilities={"CON": 14}
+    )["result"]["actor"]["id"]
+    # 掉血到 10
+    service.apply_damage(campaign["id"], actor_id, 20)
+    curr = service.get_campaign(campaign["id"])["actors"][actor_id]
+    assert curr["hp"] == 10
+
+    # 短休消耗 2 颗生命骰 (CON mod = +2)
+    rest_res = service.rest(campaign["id"], actor_id, "short", hit_dice_spent=2)["result"]
+    assert rest_res["healed"] > 0
+    assert rest_res["hit_dice"]["used"] == 2
+    assert rest_res["hp"] > 10
+
+    # 尝试消耗超出剩余的生命骰应当被拒绝
+    with pytest.raises(RuleError, match="可用生命骰不足"):
+        service.rest(campaign["id"], actor_id, "short", hit_dice_spent=3)
+
+    # 长休恢复全部生命与一半生命骰 (4的一半是2颗，used 从 2 变为 0)
+    long_res = service.rest(campaign["id"], actor_id, "long")["result"]
+    assert long_res["hp"] == 30
+    assert long_res["hit_dice"]["used"] == 0
+
+
+def test_adjust_currency_operations(service, campaign):
+    # 增加 100 GP 到队伍仓库
+    res = service.adjust_currency(campaign["id"], 100)["result"]
+    assert res["total_gp"] == 100
+
+    # 扣除 35 GP
+    res2 = service.adjust_currency(campaign["id"], -35)["result"]
+    assert res2["total_gp"] == 65
+
+    # 扣除超出余额应报错拒绝
+    with pytest.raises(RuleError, match="金币不足"):
+        service.adjust_currency(campaign["id"], -100)
+
+

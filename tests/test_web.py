@@ -61,3 +61,39 @@ def test_web_preset_catalog_and_required_campaign_selection(tmp_path: Path, monk
     assert presets.status_code == 200
     assert len(presets.json()) == 12
     assert client.post("/api/campaigns", json={"name": "缺少角色"}).status_code == 422
+
+
+def test_web_monster_presets_and_commands(tmp_path: Path, monkeypatch):
+    service = WorkshopService(CampaignStore(tmp_path / "monster-web.db"))
+    monkeypatch.setattr(web, "get_service", lambda: service)
+    client = TestClient(web.app)
+
+    # 1. 验证怪物预设接口
+    m_presets = client.get("/api/monster-presets")
+    assert m_presets.status_code == 200
+    assert any(m["preset_id"] == "goblin" for m in m_presets.json())
+
+    # 2. 创建战役
+    c_res = client.post("/api/campaigns", json={
+        "name": "怪物测试战役",
+        "preset_characters": [{"preset_id": "fighter", "name": "战士"}],
+    })
+    campaign_id = c_res.json()["id"]
+
+    # 3. 通过 web commands 刷出怪物
+    spawn_res = client.post(
+        f"/api/campaigns/{campaign_id}/commands/spawn_monster",
+        json={"preset_id": "goblin", "count": 1},
+    )
+    assert spawn_res.status_code == 200
+    assert spawn_res.json()["result"]["count"] == 1
+
+    # 4. 通过 web commands 执行属性检定
+    actor_id = next(iter(c_res.json()["actors"]))
+    check_res = client.post(
+        f"/api/campaigns/{campaign_id}/commands/check_ability",
+        json={"actor_id": actor_id, "ability": "STR", "dc": 10},
+    )
+    assert check_res.status_code == 200
+    assert "d20" in check_res.json()["result"]
+

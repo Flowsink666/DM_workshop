@@ -235,3 +235,19 @@ def ability_mod(actor: dict, ability: str) -> int:
 
 def carrying_capacity_lb(actor: dict) -> float:
     return int(actor["abilities"]["STR"]) * 15.0
+
+
+def proficiency_bonus(level: int) -> int:
+    """按角色总等级计算 5e 核心熟练加值 (1-4: +2, 5-8: +3, 9-12: +4, 13-16: +5, 17-20: +6)。"""
+    lvl = max(1, min(20, int(level or 1)))
+    return (lvl - 1) // 4 + 2
+
+
+def passive_perception(actor: dict) -> int:
+    """计算角色的被动察觉值 (10 + 感知调整值 + 熟练加值[若熟练])。"""
+    wis_mod = ability_mod(actor, "WIS")
+    prof = int(actor.get("proficiency_bonus", proficiency_bonus(actor.get("level", 1))))
+    skills = [str(s).casefold() for s in actor.get("skill_proficiencies", [])]
+    has_prof = "perception" in skills or "察觉" in skills
+    return 10 + wis_mod + (prof if has_prof else 0)
+

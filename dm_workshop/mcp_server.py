@@ -8,8 +8,10 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context
+from mcp.server.mcpserver.exceptions import ToolError
 
 from dm_workshop.dice import roll
+from dm_workshop.errors import RuleError
 from dm_workshop.mcp_groups import (
     CAPABILITY_GROUPS,
     actions_for_group,
@@ -482,7 +484,10 @@ def list_capability_groups() -> list[dict[str, Any]]:
 @mcp.tool()
 def list_group_actions(group: str) -> dict[str, Any]:
     """读取指定 MCP 大类的动作名称、说明和读写属性。"""
-    definition = get_group(group)
+    try:
+        definition = get_group(group)
+    except RuleError as exc:
+        raise ToolError(str(exc)) from exc
     return {
         "id": group,
         "name": definition["name"],
@@ -498,14 +503,20 @@ async def call_capability(
         group: str, action: str,
         arguments: dict[str, Any] | None = None) -> Any:
     """按大类和原动作名调用一个内部 MCP 功能。"""
-    tool = resolve_action(
-        group, action, _implementation_mcp._tool_manager._tools
-    )
+    try:
+        tool = resolve_action(
+            group, action, _implementation_mcp._tool_manager._tools
+        )
+    except RuleError as exc:
+        raise ToolError(str(exc)) from exc
     context = Context(
         mcp_server=_implementation_mcp,
         subscriptions=_implementation_mcp._subscriptions,
     )
-    return await tool.run(arguments or {}, context, convert_result=False)
+    try:
+        return await tool.run(arguments or {}, context, convert_result=False)
+    except RuleError as exc:
+        raise ToolError(str(exc)) from exc
 
 
 def run() -> None:

@@ -25,7 +25,9 @@ COMMANDS = {
         "apply_damage", "heal", "set_condition", "create_encounter",
         "start_encounter", "combat_attack", "combat_cast", "combat_death_save",
         "combat_end_turn", "rest",
-        "learn_spell",
+        "learn_spell", "check_ability",
+        "spawn_monster", "end_encounter", "delete_actor",
+        "adjust_currency",
     )
 }
 
@@ -58,6 +60,11 @@ def list_campaigns() -> list[dict]:
 @app.get("/api/actor-presets")
 def actor_presets() -> list[dict]:
     return get_service().list_actor_presets()
+
+
+@app.get("/api/monster-presets")
+def monster_presets() -> list[dict]:
+    return get_service().list_monster_presets()
 
 
 @app.post("/api/campaigns", status_code=201)
@@ -125,8 +132,6 @@ def execute_command(campaign_id: str, command: str,
                     body: dict[str, Any]) -> dict:
     if command in LEGACY_COMMERCE_COMMANDS:
         raise UnsupportedFeatureError("商店系统当前已下线")
-    if command not in COMMANDS:
-        raise HTTPException(status_code=404, detail=f"未知命令: {command}")
     # 白名单阻止调用者借动态路由访问 service 的内部辅助方法。
     if command not in COMMANDS:
         raise HTTPException(status_code=404, detail=f"未知命令: {command}")

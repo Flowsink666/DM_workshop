@@ -79,7 +79,8 @@ function App() {
       const result = await api<Json>(`/api/campaigns/${campaignId}/commands/${name}`, {
         method: "POST", body: JSON.stringify(body),
       });
-      setNotice("草稿已更新，尚未保存");
+      const summaryText = result?.result?.summary || "草稿已更新，尚未保存";
+      setNotice(summaryText);
       await refresh(); await refreshCampaigns();
       return result;
     } catch (reason) { showError(reason); return null; }
@@ -239,9 +240,13 @@ function CharacterSheet({actor, command}: {actor: Json, command: Command}) {
   const [amount,setAmount] = useState(1);
   return <><div className="sheet-title"><div><h2>{actor.name}</h2><p>{actor.id}</p></div><Status value={actor.life_state}/></div>
     <div className="vitals"><span><small>HP</small><b>{actor.hp}/{actor.max_hp}</b></span><span><small>临时 HP</small><b>{actor.temp_hp}</b></span><span><small>AC</small><b>{actor.ac}</b></span><span><small>速度</small><b>{actor.speed}</b></span></div>
-    <div className="ability-grid">{abilities.map(([key,value]) => <div key={key}><span>{key}</span><strong>{value}</strong><small>{Math.floor((value-10)/2)>=0?"+":""}{Math.floor((value-10)/2)}</small></div>)}</div>
-    <div className="quick-actions"><input type="number" min="0" value={amount} onChange={e=>setAmount(Number(e.target.value))}/><button className="danger" onClick={()=>command("apply_damage",{actor_id:actor.id,amount})}>扣除 HP</button><button onClick={()=>command("heal",{actor_id:actor.id,amount})}>治疗</button><button onClick={()=>command("rest",{actor_id:actor.id,rest_type:"long"})}>长休</button></div>
-    <div className="condition-line"><strong>状态</strong>{Object.keys(actor.conditions).length ? Object.keys(actor.conditions).map(c=><span key={c}>{c}</span>) : <small>无</small>}</div>
+    <div className="ability-grid">{abilities.map(([key,value]) => <div key={key} style={{cursor:"pointer"}} title={`点击进行 ${key} 属性检定`} onClick={()=>command("check_ability",{actor_id:actor.id,ability:key})}><span>{key}</span><strong>{value}</strong><small>{Math.floor((value-10)/2)>=0?"+":""}{Math.floor((value-10)/2)}</small></div>)}</div>
+    <div className="quick-actions"><input type="number" min="0" value={amount} onChange={e=>setAmount(Number(e.target.value))}/><button className="danger" onClick={()=>command("apply_damage",{actor_id:actor.id,amount})}>扣除 HP</button><button onClick={()=>command("heal",{actor_id:actor.id,amount})}>治疗</button><button onClick={()=>command("rest",{actor_id:actor.id,rest_type:"short",hit_dice_spent:1})}>短休(1HD)</button><button onClick={()=>command("rest",{actor_id:actor.id,rest_type:"long"})}>长休</button></div>
+    <div className="condition-line"><strong>状态</strong>{Object.keys(actor.conditions).length ? Object.keys(actor.conditions).map(c=><span key={c} style={{cursor:"pointer"}} title="点击移除状态" onClick={()=>command("set_condition",{actor_id:actor.id,name:c,remove:true})}>{c} ×</span>) : <small>无</small>}
+      <span style={{marginLeft:"auto",display:"inline-flex",gap:"4px"}}>
+        {["prone","poisoned","blinded"].map(c => !actor.conditions[c] && <button key={c} type="button" className="ghost" style={{padding:"1px 6px",fontSize:"11px"}} onClick={()=>command("set_condition",{actor_id:actor.id,name:c})}>+{c}</button>)}
+      </span>
+    </div>
   </>;
 }
 
@@ -253,7 +258,7 @@ function Inventory({state, command}: {state: Json, command: Command}) {
   const stacks = Object.values(inventory) as Json[];
   const weight = stacks.reduce((sum,s)=>sum + items[s.item_id].weight_lb*s.quantity,0);
   async function add(event:FormEvent<HTMLFormElement>) {event.preventDefault();const f=new FormData(event.currentTarget);await command("add_item",{owner_id:owner,item_id:f.get("item_id"),quantity:Number(f.get("quantity"))});}
-  return <><div className="toolbar-row"><div><h2>背包与装备</h2><p>重量按标准负重规则校验</p></div><select value={owner} onChange={e=>setOwner(e.target.value)}><option value="party">队伍共享仓库</option>{actors.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+  return <><div className="toolbar-row"><div><h2>背包与装备</h2><p>重量按标准负重规则校验</p></div><div style={{display:"inline-flex",gap:"6px",alignItems:"center"}}><button type="button" className="ghost" onClick={()=>command("adjust_currency",{amount_gp:50})}>+50 GP</button><button type="button" className="ghost" onClick={()=>command("adjust_currency",{amount_gp:-10})}>-10 GP</button><select value={owner} onChange={e=>setOwner(e.target.value)}><option value="party">队伍共享仓库</option>{actors.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div></div>
     <div className="inventory-summary"><Backpack size={18}/><strong>{weight.toFixed(1)} 磅</strong>{owner!=="party"&&<span>/ {state.actors[owner].abilities.STR*15} 磅</span>}<span>{stacks.length} 个物品栈</span></div>
     <table><thead><tr><th>物品</th><th>类型</th><th>数量</th><th>重量</th><th>装备栏</th><th></th></tr></thead><tbody>{stacks.map(s=>{
       const item=items[s.item_id]; return <tr key={s.id}><td><strong>{item.name}</strong><small>{item.name_en}</small></td><td>{item.kind}</td><td>{s.quantity}</td><td>{(item.weight_lb*s.quantity).toFixed(1)} lb</td><td>{s.equipped_slot||"—"}</td><td className="actions">{owner!=="party"&&item.kind==="weapon"&&!s.equipped_slot&&<button onClick={()=>command("equip_item",{actor_id:owner,stack_id:s.id,slot:"main_hand"})}>装备</button>}{s.equipped_slot&&<button onClick={()=>command("unequip_item",{actor_id:owner,stack_id:s.id})}>卸下</button>}<button className="text-danger" onClick={()=>command("remove_item",{owner_id:owner,stack_id:s.id,quantity:1})}>移除</button></td></tr>})}</tbody></table>
@@ -268,9 +273,16 @@ function Combat({state,command}:{state:Json,command:Command}) {
   async function create(e:FormEvent<HTMLFormElement>){e.preventDefault();const f=new FormData(e.currentTarget);const party=actors.filter(a=>a.kind==="pc").map(a=>a.id);const enemy=actors.filter(a=>a.kind!=="pc").map(a=>a.id);await command("create_encounter",{name:f.get("name"),sides:{party,enemy}});}
   if(active){const currentId=active.turn_order[active.current_index], current=state.actors[currentId];const targets=actors.filter(a=>a.id!==currentId&&a.hp>0);const weapons=Object.values(current.inventory).filter((s:any)=>s.equipped_slot==="main_hand");const knownSpells=current.spells.map((id:string)=>state.spells[id]).filter(Boolean);return <><div className="combat-head"><div><span>第 {active.round} 轮</span><h2>{active.name}</h2></div><div><small>当前行动者</small><strong>{current.name}</strong></div></div>
     <div className="initiative">{active.turn_order.map((id:string,index:number)=><div className={id===currentId?"active":""} key={id}><span>{active.initiatives[id]}</span><strong>{state.actors[id].name}</strong><small>{state.actors[id].hp} HP</small></div>)}</div>
-    <div className="combat-controls"><h3>本回合操作</h3>{current.life_state==="unconscious"?<button onClick={()=>command("combat_death_save",{encounter_id:active.id,actor_id:currentId})}>死亡豁免</button>:<>{targets.map(t=><button key={`atk-${t.id}`} className="attack" disabled={!weapons.length} onClick={()=>command("combat_attack",{encounter_id:active.id,actor_id:currentId,target_id:t.id,stack_id:(weapons[0] as any)?.id})}><Swords size={15}/>攻击 {t.name}</button>)}{knownSpells.flatMap((spell:any)=>targets.slice(0,1).map(t=><button key={`spell-${spell.id}`} onClick={()=>command("combat_cast",{encounter_id:active.id,actor_id:currentId,target_id:t.id,spell_id:spell.id})}>{spell.name} → {t.name}</button>))}</>}<button onClick={()=>command("combat_end_turn",{encounter_id:active.id,actor_id:currentId})}>结束回合</button>{!weapons.length&&current.life_state==="conscious"&&<small>当前角色未装备主手武器</small>}</div>
+    <div className="combat-controls"><h3>本回合操作</h3>{current.life_state==="unconscious"?<button onClick={()=>command("combat_death_save",{encounter_id:active.id,actor_id:currentId})}>死亡豁免</button>:<>{targets.map(t=><button key={`atk-${t.id}`} className="attack" disabled={!weapons.length} onClick={()=>command("combat_attack",{encounter_id:active.id,actor_id:currentId,target_id:t.id,stack_id:(weapons[0] as any)?.id})}><Swords size={15}/>攻击 {t.name}</button>)}{knownSpells.flatMap((spell:any)=>targets.slice(0,1).map(t=><button key={`spell-${spell.id}`} onClick={()=>command("combat_cast",{encounter_id:active.id,actor_id:currentId,target_id:t.id,spell_id:spell.id})}>{spell.name} → {t.name}</button>))}</>}<button onClick={()=>command("combat_end_turn",{encounter_id:active.id,actor_id:currentId})}>结束回合</button><button className="ghost text-danger" style={{marginLeft:"auto"}} onClick={()=>command("end_encounter",{encounter_id:active.id,outcome:"victory"})}>结束遭遇(胜利)</button>{!weapons.length&&current.life_state==="conscious"&&<small>当前角色未装备主手武器</small>}</div>
     <div className="section-head"><div><h2>战斗日志</h2><p>服务端骰子与状态变更</p></div></div><pre className="combat-log">{active.log.slice(-15).map((x:any)=>JSON.stringify(x)).join("\n")}</pre></>}
-  const setup=encounters.filter(e=>e.status==="setup");return <><div className="toolbar-row"><div><h2>遭遇</h2><p>自动按 PC 与非 PC 分组创建</p></div></div>{setup.map(e=><div className="setup-row" key={e.id}><Swords size={18}/><div><strong>{e.name}</strong><small>{Object.values(e.sides).flat().length} 名参与者</small></div><button onClick={()=>command("start_encounter",{encounter_id:e.id})}>投先攻并开始</button></div>)}
+  const setup=encounters.filter(e=>e.status==="setup");return <><div className="toolbar-row"><div><h2>遭遇</h2><p>自动按 PC 与非 PC 分组创建</p></div><form className="inline-form" onSubmit={async e => {
+      e.preventDefault(); const fd = new FormData(e.currentTarget);
+      await command("spawn_monster", {preset_id: fd.get("preset_id"), count: Number(fd.get("count"))});
+    }}>
+      <select name="preset_id"><option value="goblin">哥布林 (CR 1/4)</option><option value="bandit">强盗 (CR 1/8)</option><option value="skeleton">骷髅 (CR 1/4)</option><option value="zombie">僵尸 (CR 1/4)</option><option value="orc">兽人 (CR 1/2)</option><option value="wolf">野狼 (CR 1/4)</option></select>
+      <input name="count" type="number" min="1" max="10" defaultValue="1" style={{width:"50px"}}/>
+      <button><Plus size={15}/>刷出怪物</button>
+    </form></div>{setup.map(e=><div className="setup-row" key={e.id}><Swords size={18}/><div><strong>{e.name}</strong><small>{Object.values(e.sides).flat().length} 名参与者</small></div><button onClick={()=>command("start_encounter",{encounter_id:e.id})}>投先攻并开始</button></div>)}
     <form className="inline-form" onSubmit={create}><input name="name" placeholder="遭遇名称" required/><button disabled={!actors.some(a=>a.kind==="pc")||!actors.some(a=>a.kind!=="pc")}><Plus size={15}/>创建遭遇</button></form></>;
 }
 

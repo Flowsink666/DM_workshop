@@ -12,7 +12,7 @@ React 管理台 ─> Web API ─> 同一 WorkshopService
 ```
 
 - `mcp_server.py` 保留内部动作实现并只公开 3 个路由工具；`mcp_groups.py` 维护
-  7 个大类到 42 个动作的唯一映射；`mcp_compact.py` 负责紧凑返回投影。
+  6 个大类到 38 个动作的唯一映射；`mcp_compact.py` 负责紧凑返回投影。
 - `web.py` 负责 HTTP 状态码、命令白名单和静态前端托管。
 - `service.py` 是规则边界。所有状态写入必须由这里进入内存工作区。
 - `workspace_store.py` 负责内存草稿、线程锁、命名存档和保存冲突。
@@ -92,7 +92,7 @@ Backup API 创建时间戳备份，再为每个战役创建“升级前基线”
 - `test_state.py`：旧快照兼容与默认状态。
 - `test_dice.py`：骰子纯函数和边界输入。
 - `test_web.py`：HTTP 状态映射、命令链路和前端托管。
-- `test_mcp.py`：3 个公开路由、7 个大类和 42 个动作的注册契约。
+- `test_mcp.py`：3 个公开路由、6 个大类和 38 个动作的注册契约。
 - `test_mcp_compact.py`：紧凑回执、分区查询、分页和按需正文。
 - `test_workspace_store.py`：显式保存、放弃、命名存档、冲突与旧库迁移。
 
